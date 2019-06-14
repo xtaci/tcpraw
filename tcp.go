@@ -1,5 +1,3 @@
-// +build linux
-
 package tcpraw
 
 import (
@@ -55,7 +53,7 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	if err := rawconn.SetBPF(filter);err!=nil {
+	if err := rawconn.SetBPF(filter); err != nil {
 		return nil, err
 	}
 
