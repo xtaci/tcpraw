@@ -1,3 +1,5 @@
+// +build linux
+
 package tcpraw
 
 import (
@@ -12,13 +14,13 @@ type TCPConn struct {
 	rawconn *ipv4.RawConn
 }
 
-func Dial4(address string) (*TCPConn, error) {
-	addr, err := net.ResolveTCPAddr("tcp4", address)
+func Dial(network, address string) (*TCPConn, error) {
+	addr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err
 	}
 
-	conn, err := net.Dial("ip4:tcp", addr.IP.String())
+	conn, err := net.Dial("ip:tcp", addr.IP.String())
 	if err != nil {
 		return nil, err
 	}
