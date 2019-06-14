@@ -55,7 +55,9 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	rawconn.SetBPF(filter)
+	if err := rawconn.SetBPF(filter);err!=nil {
+		return nil, err
+	}
 
 	tcpconn := new(TCPConn)
 	tcpconn.conn = conn
