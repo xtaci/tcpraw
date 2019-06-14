@@ -18,7 +18,7 @@ func Dial4(address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	conn, err := net.Dial("ip4:tcp", address)
+	conn, err := net.Dial("ip4:tcp", addr.IP.String())
 	if err != nil {
 		return nil, err
 	}
