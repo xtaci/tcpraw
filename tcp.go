@@ -29,6 +29,8 @@ type TCPConn struct {
 
 	// seq
 	seqnum uint32
+	// ack
+	acknum uint32
 }
 
 func Dial(network, address string) (*TCPConn, error) {
@@ -108,12 +110,12 @@ func (conn *TCPConn) handshake() error {
 		Destination: uint16(conn.remotePort),
 		SeqNum:      atomic.AddUint32(&conn.seqnum, 1),
 		AckNum:      0,
-		DataOffset:  5,                     // 4 bits
-		Reserved:    0,                     // 3 bits
-		ECN:         0,                     // 3 bits
-		Ctrl:        TCPFlagSyn,            // 6 bits (000010, SYN bit set)
-		Window:      uint16(rand.Uint32()), // The amount of data that it is able to accept in bytes
-		Checksum:    0,                     // Kernel will set this if it's 0
+		DataOffset:  5, // 4 bits
+		Reserved:    0, // 3 bits
+		ECN:         0, // 3 bits
+		Ctrl:        TCPFlagSyn,
+		Window:      uint16(rand.Uint32()),
+		Checksum:    0,
 		Urgent:      0,
 		Options:     []TCPOption{},
 	}
@@ -128,12 +130,10 @@ func (conn *TCPConn) handshake() error {
 	}
 
 	// receive SYN ACK
-	/*
-		if err := conn.ipconn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-			return err
-		}
-		defer conn.ipconn.SetReadDeadline(time.Time{})
-	*/
+	if err := conn.ipconn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return err
+	}
+	defer conn.ipconn.SetReadDeadline(time.Time{})
 
 	for {
 		buf := make([]byte, 1024)
@@ -150,7 +150,8 @@ func (conn *TCPConn) handshake() error {
 		if tcp.HasFlag(TCPFlagRst) {
 			return io.ErrClosedPipe
 		} else if tcp.HasFlag(TCPFlagSyn) && tcp.HasFlag(TCPFlagAck) {
-			return nil
+			conn.acknum = tcp.SeqNum
+			break
 		}
 	}
 
@@ -159,13 +160,13 @@ func (conn *TCPConn) handshake() error {
 		Source:      uint16(conn.localPort), // Random ephemeral port
 		Destination: uint16(conn.remotePort),
 		SeqNum:      atomic.AddUint32(&conn.seqnum, 1),
-		AckNum:      0,
-		DataOffset:  5,                     // 4 bits
-		Reserved:    0,                     // 3 bits
-		ECN:         0,                     // 3 bits
-		Ctrl:        TCPFlagAck,            // 6 bits (000010, SYN bit set)
-		Window:      uint16(rand.Uint32()), // The amount of data that it is able to accept in bytes
-		Checksum:    0,                     // Kernel will set this if it's 0
+		AckNum:      atomic.AddUint32(&conn.acknum, 1),
+		DataOffset:  5, // 4 bits
+		Reserved:    0, // 3 bits
+		ECN:         0, // 3 bits
+		Ctrl:        TCPFlagAck,
+		Window:      uint16(rand.Uint32()),
+		Checksum:    0,
 		Urgent:      0,
 		Options:     []TCPOption{},
 	}
@@ -196,12 +197,11 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 			buf = buf[:numRead]
 			tcp := NewTCPHeader(buf)
 			if parseIPv4(addr.IP.To4()) != conn.remoteIP || tcp.Source != conn.remotePort {
-				log.Println("readfrom", numRead, tcp.Ctrl, addr, tcp.Source, tcp.Destination, conn.remotePort)
 				continue
 			}
 			// Closed port gets RST, open port gets SYN ACK
 			if tcp.HasFlag(TCPFlagPsh) {
-				n := copy(buf, buf[tcp.DataOffset<<2:])
+				n := copy(p, buf[tcp.DataOffset<<2:])
 				return n, addr, nil
 			}
 		} else {

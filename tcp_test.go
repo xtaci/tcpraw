@@ -5,7 +5,7 @@ package tcpraw
 import "testing"
 
 func TestDial(t *testing.T) {
-	conn, err := Dial("tcp", "127.0.0.1:22")
+	conn, err := Dial("tcp", "192.168.2.1:80")
 	if err != nil {
 		t.Fatal(err)
 	}
