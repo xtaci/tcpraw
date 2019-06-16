@@ -139,5 +139,28 @@ func (conn *TCPConn) handshake() error {
 			return nil
 		}
 	}
+
+	// send ACK
+	packet = TCPHeader{
+		Source:      uint16(conn.localPort), // Random ephemeral port
+		Destination: uint16(conn.remotePort),
+		SeqNum:      rand.Uint32(),
+		AckNum:      0,
+		DataOffset:  5,                     // 4 bits
+		Reserved:    0,                     // 3 bits
+		ECN:         0,                     // 3 bits
+		Ctrl:        TCPFlagAck,            // 6 bits (000010, SYN bit set)
+		Window:      uint16(rand.Uint32()), // The amount of data that it is able to accept in bytes
+		Checksum:    0,                     // Kernel will set this if it's 0
+		Urgent:      0,
+		Options:     []TCPOption{},
+	}
+	data = packet.Marshal()
+	packet.Checksum = Csum(data, conn.bLocalIP, conn.bRemoteIP)
+	data = packet.Marshal()
+	_, err = conn.ipconn.Write(data)
+	if err != nil {
+		return err
+	}
 	return nil
 }
