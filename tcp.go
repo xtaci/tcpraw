@@ -7,6 +7,7 @@ import (
 	"net"
 	"runtime"
 	"syscall"
+	"time"
 )
 
 type TCPConn struct {
@@ -121,6 +122,10 @@ func (conn *TCPConn) handshake() error {
 	}
 
 	// receive SYN ACK
+	if err := conn.ipconn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return err
+	}
+
 	for {
 		buf := make([]byte, 1024)
 		numRead, addr, err := conn.ipconn.ReadFromIP(buf)
@@ -139,6 +144,7 @@ func (conn *TCPConn) handshake() error {
 			return nil
 		}
 	}
+	conn.ipconn.SetReadDeadline(time.Time{})
 
 	// send ACK
 	packet = TCPHeader{
