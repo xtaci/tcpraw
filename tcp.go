@@ -1,86 +1,89 @@
 package tcpraw
 
 import (
+	"io"
+	"log"
 	"math/rand"
 	"net"
-
-	"golang.org/x/net/bpf"
-	"golang.org/x/net/ipv4"
+	"runtime"
+	"syscall"
+	"time"
 )
 
 type TCPConn struct {
-	tx    net.Conn
-	rx    *ipv4.RawConn
-	laddr *net.TCPAddr
-	raddr *net.TCPAddr
+	fd     int
+	ipconn *net.IPConn
+	//rx *net.IPConn
+
+	// local address
+	localPort uint16
+	localIP   uint32
+	bLocalIP  []byte
+
+	// remote address
+	remotePort    uint16
+	remoteIP      uint32
+	bRemoteIP     []byte
+	remoteAddress string
 }
 
 func Dial(network, address string) (*TCPConn, error) {
+	tcpconn := new(TCPConn)
 	raddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err
 	}
 
-	// a fake conn to get ip and port
+	tcpconn.remoteAddress = address
+	tcpconn.remotePort = uint16(raddr.Port)
+	tcpconn.remoteIP = parseIPv4(raddr.IP.To4())
+	tcpconn.bRemoteIP = make([]byte, 4)
+	copy(tcpconn.bRemoteIP, raddr.IP.To4())
+
+	// outgoing addres and port hack
 	fakeconn, err := net.Dial("udp", address)
 	if err != nil {
 		return nil, err
 	}
-	laddr, _ := net.ResolveTCPAddr(network, fakeconn.LocalAddr().String())
+
+	laddr, err := net.ResolveTCPAddr("tcp", fakeconn.LocalAddr().String())
+	if err != nil {
+		return nil, err
+	}
+	tcpconn.localPort = uint16(laddr.Port)
+	tcpconn.localIP = parseIPv4(laddr.IP.To4())
+	tcpconn.bLocalIP = make([]byte, 4)
+	copy(tcpconn.bLocalIP, laddr.IP.To4())
 	fakeconn.Close()
 
-	// rx conn
-	rxconn, err := net.Dial("ip4:tcp", raddr.IP.String())
+	// bind to that address and port again
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.O_NONBLOCK|syscall.SOCK_STREAM, 0)
 	if err != nil {
 		return nil, err
 	}
-
-	// bpf filter the only connection
-	filter := []bpf.RawInstruction{
-		{0x28, 0, 0, 0x0000000c},
-		{0x15, 15, 0, 0x000086dd},
-		{0x15, 0, 14, 0x00000800},
-		{0x30, 0, 0, 0x00000017},
-		{0x15, 0, 12, 0x00000006},
-		{0x20, 0, 0, 0x0000001a},
-		{0x15, 0, 10, parseIPv4(raddr.IP.To4())}, // src ip
-		{0x28, 0, 0, 0x00000014},
-		{0x45, 8, 0, 0x00001fff},
-		{0xb1, 0, 0, 0x0000000e},
-		{0x48, 0, 0, 0x0000000e},
-		{0x15, 0, 5, uint32(raddr.Port)}, // src port
-		{0x20, 0, 0, 0x0000001e},
-		{0x15, 0, 3, parseIPv4(laddr.IP.To4())}, // dst ip
-		{0x48, 0, 0, 0x00000010},
-		{0x15, 0, 1, uint32(laddr.Port)}, // dst port
-		{0x6, 0, 0, 0x00040000},
-		{0x6, 0, 0, 0x00000000},
+	addr := syscall.SockaddrInet4{Port: int(tcpconn.localPort)}
+	copy(addr.Addr[:], tcpconn.bLocalIP)
+	if err := syscall.Bind(fd, &addr); err != nil {
+		return nil, err
 	}
+	tcpconn.fd = fd
+	runtime.SetFinalizer(tcpconn, func(conn *TCPConn) {
+		syscall.Close(conn.fd)
+	})
 
-	rawconn, err := ipv4.NewRawConn(rxconn.(net.PacketConn))
+	// connected raw ip socket
+	ipconn, err := net.Dial("ip4:tcp", raddr.IP.String())
 	if err != nil {
 		return nil, err
 	}
+	tcpconn.ipconn = ipconn.(*net.IPConn)
 
-	if err := rawconn.SetBPF(filter); err != nil {
+	// handshake
+	if err := tcpconn.handshake(); err != nil {
 		return nil, err
 	}
 
-	// tx conn
-	txconn, err := net.Dial("ip4:tcp", raddr.IP.String())
-	if err != nil {
-		return nil, err
-	}
-
-	tcpconn := new(TCPConn)
-	tcpconn.tx = txconn
-	tcpconn.rx = rawconn
-	tcpconn.laddr = laddr
-	tcpconn.raddr = raddr
-	if err := tcpconn.sendSyn(); err != nil {
-		return nil, err
-	}
-
+	<-time.After(time.Minute)
 	return tcpconn, nil
 }
 
@@ -93,10 +96,11 @@ func parseIPv4(ip4 net.IP) uint32 {
 	return ip
 }
 
-func (conn *TCPConn) sendSyn() error {
+func (conn *TCPConn) handshake() error {
+	// send SYN
 	packet := TCPHeader{
-		Source:      uint16(conn.laddr.Port), // Random ephemeral port
-		Destination: uint16(conn.raddr.Port),
+		Source:      uint16(conn.localPort), // Random ephemeral port
+		Destination: uint16(conn.remotePort),
 		SeqNum:      rand.Uint32(),
 		AckNum:      0,
 		DataOffset:  5,                     // 4 bits
@@ -110,13 +114,32 @@ func (conn *TCPConn) sendSyn() error {
 	}
 
 	data := packet.Marshal()
-	packet.Checksum = Csum(data, conn.laddr.IP.To4(), conn.raddr.IP.To4())
+	packet.Checksum = Csum(data, conn.bLocalIP, conn.bRemoteIP)
 	data = packet.Marshal()
 
-	_, err := conn.tx.Write(data)
+	_, err := conn.ipconn.Write(data)
 	if err != nil {
 		return err
 	}
 
+	// receive SYN ACK
+	for {
+		buf := make([]byte, 1024)
+		numRead, addr, err := conn.ipconn.ReadFromIP(buf)
+		if err != nil {
+			log.Fatalf("ReadFrom: %s\n", err)
+		}
+
+		tcp := NewTCPHeader(buf[:numRead])
+		if parseIPv4(addr.IP.To4()) != conn.remoteIP || tcp.Source != conn.remotePort {
+			continue
+		}
+		// Closed port gets RST, open port gets SYN ACK
+		if tcp.HasFlag(TCPFlagRst) {
+			return io.ErrClosedPipe
+		} else if tcp.HasFlag(TCPFlagSyn) && tcp.HasFlag(TCPFlagAck) {
+			return nil
+		}
+	}
 	return nil
 }
