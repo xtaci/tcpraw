@@ -7,7 +7,6 @@ import (
 	"net"
 	"runtime"
 	"syscall"
-	"time"
 )
 
 type TCPConn struct {
@@ -83,7 +82,6 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	<-time.After(time.Minute)
 	return tcpconn, nil
 }
 
