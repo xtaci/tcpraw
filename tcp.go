@@ -2,18 +2,17 @@ package tcpraw
 
 import (
 	"io"
-	"log"
+	"io/ioutil"
 	"math/rand"
 	"net"
-	"runtime"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
 type TCPConn struct {
-	fd     int
-	ipconn *net.IPConn
+	fd      int
+	ipconn  *net.IPConn
+	tcpconn *net.TCPConn
 	//rx *net.IPConn
 
 	// local address
@@ -34,64 +33,55 @@ type TCPConn struct {
 }
 
 func Dial(network, address string) (*TCPConn, error) {
-	tcpconn := new(TCPConn)
-	tcpconn.seqnum = rand.Uint32()
-	// remote
+	conn := new(TCPConn)
+	// remote address resolve
 	raddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err
 	}
 
-	tcpconn.remoteAddress = address
-	tcpconn.remotePort = uint16(raddr.Port)
-	tcpconn.remoteIP = parseIPv4(raddr.IP.To4())
-	tcpconn.bRemoteIP = make([]byte, 4)
-	copy(tcpconn.bRemoteIP, raddr.IP.To4())
-
-	// outgoing addres and port hack
-	fakeconn, err := net.Dial("udp", address)
-	if err != nil {
-		return nil, err
-	}
-
-	laddr, err := net.ResolveTCPAddr("tcp", fakeconn.LocalAddr().String())
-	if err != nil {
-		return nil, err
-	}
-	tcpconn.localPort = uint16(laddr.Port)
-	tcpconn.localIP = parseIPv4(laddr.IP.To4())
-	tcpconn.bLocalIP = make([]byte, 4)
-	copy(tcpconn.bLocalIP, laddr.IP.To4())
-	fakeconn.Close()
-
-	// bind to that address and port again
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.O_NONBLOCK|syscall.SOCK_STREAM, 0)
-	if err != nil {
-		return nil, err
-	}
-	addr := syscall.SockaddrInet4{Port: int(tcpconn.localPort)}
-	copy(addr.Addr[:], tcpconn.bLocalIP)
-	if err := syscall.Bind(fd, &addr); err != nil {
-		return nil, err
-	}
-	tcpconn.fd = fd
-	runtime.SetFinalizer(tcpconn, func(conn *TCPConn) {
-		syscall.Close(conn.fd)
-	})
-
-	// connected raw ip socket
+	// raw socket
 	ipconn, err := net.Dial("ip4:tcp", raddr.IP.String())
 	if err != nil {
 		return nil, err
 	}
-	tcpconn.ipconn = ipconn.(*net.IPConn)
-
-	// handshake
-	if err := tcpconn.handshake(); err != nil {
+	conn.ipconn = ipconn.(*net.IPConn)
+	// create an established tcp connection
+	// will hack this tcp connection for packet transmission
+	tcpconn, err := net.DialTCP("tcp", nil, raddr)
+	if err != nil {
 		return nil, err
 	}
 
-	return tcpconn, nil
+	laddr, err := net.ResolveTCPAddr("tcp", tcpconn.LocalAddr().String())
+	if err != nil {
+		return nil, err
+	}
+
+	// fields
+	conn.tcpconn = tcpconn
+	conn.remoteAddress = address
+	conn.remotePort = uint16(raddr.Port)
+	conn.remoteIP = parseIPv4(raddr.IP.To4())
+	conn.bRemoteIP = make([]byte, 4)
+	copy(conn.bRemoteIP, raddr.IP.To4())
+
+	conn.localPort = uint16(laddr.Port)
+	conn.localIP = parseIPv4(laddr.IP.To4())
+	conn.bLocalIP = make([]byte, 4)
+	copy(conn.bLocalIP, laddr.IP.To4())
+
+	// init sequence numbers
+	if err := conn.initSeq(); err != nil {
+		return nil, err
+	}
+
+	// discard data flow on tcp conn
+	go conn.discard()
+
+	go conn.ackSeq()
+
+	return conn, nil
 }
 
 func parseIPv4(ip4 net.IP) uint32 {
@@ -103,81 +93,54 @@ func parseIPv4(ip4 net.IP) uint32 {
 	return ip
 }
 
-func (conn *TCPConn) handshake() error {
-	// send SYN
-	packet := TCPHeader{
-		Source:      uint16(conn.localPort), // Random ephemeral port
-		Destination: uint16(conn.remotePort),
-		SeqNum:      atomic.AddUint32(&conn.seqnum, 1),
-		AckNum:      0,
-		DataOffset:  5, // 4 bits
-		Reserved:    0, // 3 bits
-		ECN:         0, // 3 bits
-		Ctrl:        TCPFlagSyn,
-		Window:      uint16(rand.Uint32()),
-		Checksum:    0,
-		Urgent:      0,
-		Options:     []TCPOption{},
-	}
+// dummy tcp reader to discard all data read from tcp conn
+func (conn *TCPConn) discard() { io.Copy(ioutil.Discard, conn.tcpconn) }
 
-	data := packet.Marshal()
-	packet.Checksum = Csum(data, conn.bLocalIP, conn.bRemoteIP)
-	data = packet.Marshal()
-
-	_, err := conn.ipconn.Write(data)
-	if err != nil {
-		return err
-	}
-
-	// receive SYN ACK
-	if err := conn.ipconn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-		return err
-	}
-	defer conn.ipconn.SetReadDeadline(time.Time{})
-
+func (conn *TCPConn) initSeq() error {
 	for {
 		buf := make([]byte, 1024)
 		numRead, addr, err := conn.ipconn.ReadFromIP(buf)
 		if err != nil {
-			log.Fatalf("ReadFrom: %s\n", err)
+			return err
 		}
 
 		tcp := NewTCPHeader(buf[:numRead])
 		if parseIPv4(addr.IP.To4()) != conn.remoteIP || tcp.Source != conn.remotePort {
 			continue
 		}
+
 		// Closed port gets RST, open port gets SYN ACK
 		if tcp.HasFlag(TCPFlagRst) {
 			return io.ErrClosedPipe
 		} else if tcp.HasFlag(TCPFlagSyn) && tcp.HasFlag(TCPFlagAck) {
-			conn.acknum = tcp.SeqNum
-			break
+			// capture the SYN+ACK to initiate sequence numbers
+			conn.acknum = tcp.SeqNum + 1
+			conn.seqnum = tcp.AckNum
+			return nil
 		}
 	}
+}
 
-	// send ACK
-	packet = TCPHeader{
-		Source:      uint16(conn.localPort), // Random ephemeral port
-		Destination: uint16(conn.remotePort),
-		SeqNum:      atomic.AddUint32(&conn.seqnum, 1),
-		AckNum:      atomic.AddUint32(&conn.acknum, 1),
-		DataOffset:  5, // 4 bits
-		Reserved:    0, // 3 bits
-		ECN:         0, // 3 bits
-		Ctrl:        TCPFlagAck,
-		Window:      uint16(rand.Uint32()),
-		Checksum:    0,
-		Urgent:      0,
-		Options:     []TCPOption{},
+func (conn *TCPConn) ackSeq() error {
+	for {
+		buf := make([]byte, 1024)
+		numRead, addr, err := conn.ipconn.ReadFromIP(buf)
+		if err != nil {
+			return err
+		}
+
+		tcp := NewTCPHeader(buf[:numRead])
+		if parseIPv4(addr.IP.To4()) != conn.remoteIP || tcp.Source != conn.remotePort {
+			continue
+		}
+
+		if tcp.HasFlag(TCPFlagRst) {
+			return io.ErrClosedPipe
+		} else if tcp.HasFlag(TCPFlagPsh) { // record peer's sequence number
+			atomic.StoreUint32(&conn.acknum, tcp.SeqNum)
+			atomic.StoreUint32(&conn.seqnum, tcp.AckNum)
+		}
 	}
-	data = packet.Marshal()
-	packet.Checksum = Csum(data, conn.bLocalIP, conn.bRemoteIP)
-	data = packet.Marshal()
-	_, err = conn.ipconn.Write(data)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 // ReadFrom reads a packet from the connection,
@@ -216,18 +179,49 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 // see SetDeadline and SetWriteDeadline.
 // On packet-oriented connections, write timeouts are rare.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	return 0, nil
+	// PSH
+	packet := TCPHeader{
+		Source:      uint16(conn.localPort),
+		Destination: uint16(conn.remotePort),
+		SeqNum:      atomic.LoadUint32(&conn.seqnum),
+		AckNum:      atomic.LoadUint32(&conn.acknum),
+		DataOffset:  5, // 4 bits
+		Reserved:    0, // 3 bits
+		ECN:         0, // 3 bits
+		Ctrl:        TCPFlagPsh | TCPFlagAck,
+		Window:      uint16(rand.Uint32()),
+		Checksum:    0,
+		Urgent:      0,
+		Options:     []TCPOption{},
+	}
+
+	data := packet.Marshal()
+	packet.Checksum = Csum(data, conn.bLocalIP, conn.bRemoteIP)
+	data = packet.Marshal()
+
+	buf := make([]byte, len(data)+len(p))
+	copy(buf, data)
+	copy(buf[len(data):], p)
+
+	if _, err := conn.ipconn.Write(buf); err != nil {
+		return 0, err
+	}
+
+	// increment on seqnum
+	atomic.AddUint32(&conn.seqnum, uint32(len(p)))
+	return len(p), nil
 }
 
 // Close closes the connection.
 // Any blocked ReadFrom or WriteTo operations will be unblocked and return errors.
 func (conn *TCPConn) Close() error {
-	return nil
+	conn.tcpconn.Close()
+	return conn.ipconn.Close()
 }
 
 // LocalAddr returns the local network address.
 func (conn *TCPConn) LocalAddr() net.Addr {
-	return nil
+	return conn.tcpconn.LocalAddr()
 }
 
 // SetDeadline sets the read and write deadlines associated
@@ -245,22 +239,16 @@ func (conn *TCPConn) LocalAddr() net.Addr {
 // the deadline after successful ReadFrom or WriteTo calls.
 //
 // A zero value for t means I/O operations will not time out.
-func (conn *TCPConn) SetDeadline(t time.Time) error {
-	return nil
-}
+func (conn *TCPConn) SetDeadline(t time.Time) error { return conn.ipconn.SetDeadline(t) }
 
 // SetReadDeadline sets the deadline for future ReadFrom calls
 // and any currently-blocked ReadFrom call.
 // A zero value for t means ReadFrom will not time out.
-func (conn *TCPConn) SetReadDeadline(t time.Time) error {
-	return nil
-}
+func (conn *TCPConn) SetReadDeadline(t time.Time) error { return conn.ipconn.SetReadDeadline(t) }
 
 // SetWriteDeadline sets the deadline for future WriteTo calls
 // and any currently-blocked WriteTo call.
 // Even if write times out, it may return n > 0, indicating that
 // some of the data was successfully written.
 // A zero value for t means WriteTo will not time out.
-func (conn *TCPConn) SetWriteDeadline(t time.Time) error {
-	return nil
-}
+func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return conn.ipconn.SetWriteDeadline(t) }
