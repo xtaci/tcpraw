@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -25,10 +26,15 @@ type TCPConn struct {
 	remoteIP      uint32
 	bRemoteIP     []byte
 	remoteAddress string
+
+	// seq
+	seqnum uint32
 }
 
 func Dial(network, address string) (*TCPConn, error) {
 	tcpconn := new(TCPConn)
+	tcpconn.seqnum = rand.Uint32()
+	// remote
 	raddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err
@@ -100,7 +106,7 @@ func (conn *TCPConn) handshake() error {
 	packet := TCPHeader{
 		Source:      uint16(conn.localPort), // Random ephemeral port
 		Destination: uint16(conn.remotePort),
-		SeqNum:      rand.Uint32(),
+		SeqNum:      atomic.AddUint32(&conn.seqnum, 1),
 		AckNum:      0,
 		DataOffset:  5,                     // 4 bits
 		Reserved:    0,                     // 3 bits
@@ -122,9 +128,12 @@ func (conn *TCPConn) handshake() error {
 	}
 
 	// receive SYN ACK
-	if err := conn.ipconn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-		return err
-	}
+	/*
+		if err := conn.ipconn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			return err
+		}
+		defer conn.ipconn.SetReadDeadline(time.Time{})
+	*/
 
 	for {
 		buf := make([]byte, 1024)
@@ -144,13 +153,12 @@ func (conn *TCPConn) handshake() error {
 			return nil
 		}
 	}
-	conn.ipconn.SetReadDeadline(time.Time{})
 
 	// send ACK
 	packet = TCPHeader{
 		Source:      uint16(conn.localPort), // Random ephemeral port
 		Destination: uint16(conn.remotePort),
-		SeqNum:      rand.Uint32(),
+		SeqNum:      atomic.AddUint32(&conn.seqnum, 1),
 		AckNum:      0,
 		DataOffset:  5,                     // 4 bits
 		Reserved:    0,                     // 3 bits
@@ -182,7 +190,24 @@ func (conn *TCPConn) handshake() error {
 // an Error with Timeout() == true after a fixed time limit;
 // see SetDeadline and SetReadDeadline.
 func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	return 0, nil, nil
+	for {
+		buf := make([]byte, 1500)
+		if numRead, addr, err := conn.ipconn.ReadFromIP(buf); err == nil {
+			buf = buf[:numRead]
+			tcp := NewTCPHeader(buf)
+			if parseIPv4(addr.IP.To4()) != conn.remoteIP || tcp.Source != conn.remotePort {
+				log.Println("readfrom", numRead, tcp.Ctrl, addr, tcp.Source, tcp.Destination, conn.remotePort)
+				continue
+			}
+			// Closed port gets RST, open port gets SYN ACK
+			if tcp.HasFlag(TCPFlagPsh) {
+				n := copy(buf, buf[tcp.DataOffset<<2:])
+				return n, addr, nil
+			}
+		} else {
+			return numRead, addr, err
+		}
+	}
 }
 
 // WriteTo writes a packet with payload p to addr.
