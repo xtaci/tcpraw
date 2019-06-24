@@ -34,10 +34,11 @@ type TCPConn struct {
 	remoteAddress string
 
 	// packet capture
-	handle       *pcap.Handle
-	pktsrc       *gopacket.PacketSource
-	chPacket     chan []byte
-	networkLayer gopacket.Layer
+	handle    *pcap.Handle
+	pktsrc    *gopacket.PacketSource
+	chPacket  chan []byte
+	ethLayer  gopacket.Layer
+	loopLayer gopacket.Layer
 
 	// seq
 	seqnum uint32
@@ -159,6 +160,8 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 			atomic.StoreUint32(&conn.acknum, transport.Seq)
 			atomic.StoreUint32(&conn.seqnum, transport.Ack)
 			once.Do(func() {
+				conn.ethLayer = packet.Layer(layers.LayerTypeEthernet)
+				conn.loopLayer = packet.Layer(layers.LayerTypeLoopback)
 				wg.Done()
 			})
 
@@ -206,7 +209,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			DstIP:    conn.tcpconn.RemoteAddr().(*net.TCPAddr).IP,
 			Protocol: layers.IPProtocolTCP,
 			Version:  0x4,
-			Id:       1024,
+			Id:       1234,
 			Flags:    layers.IPv4DontFragment,
 			TTL:      0x40,
 		},
