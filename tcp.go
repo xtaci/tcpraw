@@ -34,9 +34,10 @@ type TCPConn struct {
 	remoteAddress string
 
 	// packet capture
-	handle   *pcap.Handle
-	pktsrc   *gopacket.PacketSource
-	chPacket chan []byte
+	handle       *pcap.Handle
+	pktsrc       *gopacket.PacketSource
+	chPacket     chan []byte
+	networkLayer gopacket.Layer
 
 	// seq
 	seqnum uint32
@@ -157,7 +158,9 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 			transport := packet.TransportLayer().(*layers.TCP)
 			atomic.StoreUint32(&conn.acknum, transport.Seq)
 			atomic.StoreUint32(&conn.seqnum, transport.Ack)
-			once.Do(wg.Done)
+			once.Do(func() {
+				wg.Done()
+			})
 
 			if transport.PSH {
 				payloadChan <- transport.Payload
@@ -192,22 +195,48 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 // On packet-oriented connections, write timeouts are rare.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	buf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{}
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
 	gopacket.SerializeLayers(buf, opts,
+		&layers.Loopback{Family: layers.ProtocolFamilyIPv4},
+		&layers.IPv4{
+			SrcIP:    conn.tcpconn.LocalAddr().(*net.TCPAddr).IP,
+			DstIP:    conn.tcpconn.RemoteAddr().(*net.TCPAddr).IP,
+			Protocol: layers.IPProtocolTCP,
+			Version:  0x4,
+			Id:       1024,
+			Flags:    layers.IPv4DontFragment,
+			TTL:      0x40,
+		},
 		&layers.TCP{
 			SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
 			DstPort: layers.TCPPort(conn.tcpconn.RemoteAddr().(*net.TCPAddr).Port),
-			Window:  65535,
+			Window:  12580,
 			Ack:     atomic.LoadUint32(&conn.acknum) + 1,
 			Seq:     atomic.LoadUint32(&conn.seqnum),
 			PSH:     true,
+			ACK:     true,
+			Options: []layers.TCPOption{{
+				OptionType:   layers.TCPOptionKindMSS,
+				OptionLength: 4,
+				OptionData:   []byte{0x5, 0xb4},
+			}, layers.TCPOption{
+				OptionType:   layers.TCPOptionKindWindowScale,
+				OptionLength: 3,
+				OptionData:   []byte{0x6},
+			}, layers.TCPOption{
+				OptionType:   layers.TCPOptionKindSACKPermitted,
+				OptionLength: 2,
+			}},
 		},
+		gopacket.Payload(p),
 	)
 
 	if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
 		return 0, err
 	}
-	log.Println(err)
 
 	atomic.AddUint32(&conn.seqnum, uint32(len(p)))
 	return len(p), nil
