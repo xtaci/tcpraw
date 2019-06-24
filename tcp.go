@@ -197,20 +197,6 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		Seq:     atomic.LoadUint32(&conn.seqnum),
 		PSH:     true,
 		ACK:     true,
-		/*
-			Options: []layers.TCPOption{{
-				OptionType:   layers.TCPOptionKindMSS,
-				OptionLength: 4,
-				OptionData:   []byte{0x5, 0xb4},
-			}, layers.TCPOption{
-				OptionType:   layers.TCPOptionKindWindowScale,
-				OptionLength: 3,
-				OptionData:   []byte{0x6},
-			}, layers.TCPOption{
-				OptionType:   layers.TCPOptionKindSACKPermitted,
-				OptionLength: 2,
-			}},
-		*/
 	}
 	tcp.SetNetworkLayerForChecksum(network)
 	payload := gopacket.Payload(p)
