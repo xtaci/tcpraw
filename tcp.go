@@ -111,15 +111,6 @@ func Dial(network, address string) (*TCPConn, error) {
 	return conn, nil
 }
 
-func parseIPv4(ip4 net.IP) uint32 {
-	var ip uint32
-	ip |= uint32(ip4[0]) << 24
-	ip |= uint32(ip4[1]) << 16
-	ip |= uint32(ip4[2]) << 8
-	ip |= uint32(ip4[3])
-	return ip
-}
-
 // dummy tcp reader to discard all data read from tcp conn
 func (conn *TCPConn) discard(r io.Reader) { io.Copy(ioutil.Discard, r) }
 
