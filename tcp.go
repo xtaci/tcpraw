@@ -20,18 +20,6 @@ type TCPConn struct {
 	fd      int
 	ipconn  *net.IPConn
 	tcpconn *net.TCPConn
-	//rx *net.IPConn
-
-	// local address
-	localPort uint16
-	localIP   uint32
-	bLocalIP  []byte
-
-	// remote address
-	remotePort    uint16
-	remoteIP      uint32
-	bRemoteIP     []byte
-	remoteAddress string
 
 	// packet capture
 	handle    *pcap.Handle
@@ -116,19 +104,8 @@ func Dial(network, address string) (*TCPConn, error) {
 
 	// fields
 	conn.tcpconn = tcpconn
-	conn.remoteAddress = address
-	conn.remotePort = uint16(raddr.Port)
-	conn.remoteIP = parseIPv4(raddr.IP.To4())
-	conn.bRemoteIP = make([]byte, 4)
-	copy(conn.bRemoteIP, raddr.IP.To4())
-
-	conn.localPort = uint16(laddr.Port)
-	conn.localIP = parseIPv4(laddr.IP.To4())
-	conn.bLocalIP = make([]byte, 4)
-	copy(conn.bLocalIP, laddr.IP.To4())
-
 	// discard data flow on tcp conn
-	go conn.discard()
+	go conn.discard(tcpconn)
 	conn.chPacket = conn.receiver(gopacket.NewPacketSource(handle, handle.LinkType()))
 
 	return conn, nil
@@ -144,7 +121,7 @@ func parseIPv4(ip4 net.IP) uint32 {
 }
 
 // dummy tcp reader to discard all data read from tcp conn
-func (conn *TCPConn) discard() { io.Copy(ioutil.Discard, conn.tcpconn) }
+func (conn *TCPConn) discard(r io.Reader) { io.Copy(ioutil.Discard, r) }
 
 // packet receiver
 func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
