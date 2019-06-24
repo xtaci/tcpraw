@@ -1,12 +1,20 @@
 package tcpraw
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
 )
 
 type TCPConn struct {
@@ -26,6 +34,10 @@ type TCPConn struct {
 	bRemoteIP     []byte
 	remoteAddress string
 
+	// packet capture
+	pktsrc   *gopacket.PacketSource
+	chPacket chan []byte
+
 	// seq
 	seqnum uint32
 	// ack
@@ -34,29 +46,71 @@ type TCPConn struct {
 
 func Dial(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
+
 	// remote address resolve
 	raddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err
 	}
 
-	// raw socket
+	// udp dummy
+	dummy, err := net.Dial("udp4", address)
+	if err != nil {
+		return nil, err
+	}
+
+	// get iface name from the dummy connection
+	ifaces, err := pcap.FindAllDevs()
+	if err != nil {
+		return nil, err
+	}
+
+	var ifaceName string
+	for _, iface := range ifaces {
+		for _, addr := range iface.Addresses {
+			if addr.IP.Equal(dummy.LocalAddr().(*net.UDPAddr).IP) {
+				ifaceName = iface.Name
+			}
+		}
+	}
+	if ifaceName == "" {
+		return nil, errors.New("cannot find correct interface")
+	}
+
+	handle, err := pcap.OpenLive(ifaceName, 65536, true, time.Millisecond)
+	if err != nil {
+		return nil, err
+	}
+
+	laddr, err := net.ResolveTCPAddr("tcp", dummy.LocalAddr().String())
+	if err != nil {
+		return nil, err
+	}
+	dummy.Close()
+
+	// apply filter
+	filter := "tcp and dst host " + laddr.IP.String() +
+		" and dst port " + fmt.Sprint(laddr.Port) +
+		" and src host " + raddr.IP.String() +
+		" and src port " + fmt.Sprint(raddr.Port)
+	log.Println(filter)
+	if err := handle.SetBPFFilter(filter); err != nil {
+		return nil, err
+	}
+
+	// create an established tcp connection
+	// will hack this tcp connection for packet transmission
+	tcpconn, err := net.DialTCP("tcp", laddr, raddr)
+	if err != nil {
+		return nil, err
+	}
+
+	// a raw socket for sending
 	ipconn, err := net.Dial("ip4:tcp", raddr.IP.String())
 	if err != nil {
 		return nil, err
 	}
 	conn.ipconn = ipconn.(*net.IPConn)
-	// create an established tcp connection
-	// will hack this tcp connection for packet transmission
-	tcpconn, err := net.DialTCP("tcp", nil, raddr)
-	if err != nil {
-		return nil, err
-	}
-
-	laddr, err := net.ResolveTCPAddr("tcp", tcpconn.LocalAddr().String())
-	if err != nil {
-		return nil, err
-	}
 
 	// fields
 	conn.tcpconn = tcpconn
@@ -71,15 +125,9 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.bLocalIP = make([]byte, 4)
 	copy(conn.bLocalIP, laddr.IP.To4())
 
-	// init sequence numbers
-	if err := conn.initSeq(); err != nil {
-		return nil, err
-	}
-
 	// discard data flow on tcp conn
 	go conn.discard()
-
-	go conn.ackSeq()
+	conn.chPacket = conn.receiver(gopacket.NewPacketSource(handle, handle.LinkType()))
 
 	return conn, nil
 }
@@ -96,51 +144,24 @@ func parseIPv4(ip4 net.IP) uint32 {
 // dummy tcp reader to discard all data read from tcp conn
 func (conn *TCPConn) discard() { io.Copy(ioutil.Discard, conn.tcpconn) }
 
-func (conn *TCPConn) initSeq() error {
-	for {
-		buf := make([]byte, 1024)
-		numRead, addr, err := conn.ipconn.ReadFromIP(buf)
-		if err != nil {
-			return err
-		}
+// packet receiver
+func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	payloadChan := make(chan []byte, 128)
 
-		tcp := NewTCPHeader(buf[:numRead])
-		if parseIPv4(addr.IP.To4()) != conn.remoteIP || tcp.Source != conn.remotePort {
-			continue
+	go func() {
+		var once sync.Once
+		for packet := range source.Packets() {
+			transport := packet.TransportLayer().(*layers.TCP)
+			atomic.StoreUint32(&conn.acknum, transport.Seq)
+			atomic.StoreUint32(&conn.seqnum, transport.Ack)
+			once.Do(wg.Done)
 		}
+	}()
 
-		// Closed port gets RST, open port gets SYN ACK
-		if tcp.HasFlag(TCPFlagRst) {
-			return io.ErrClosedPipe
-		} else if tcp.HasFlag(TCPFlagSyn) && tcp.HasFlag(TCPFlagAck) {
-			// capture the SYN+ACK to initiate sequence numbers
-			conn.acknum = tcp.SeqNum + 1
-			conn.seqnum = tcp.AckNum
-			return nil
-		}
-	}
-}
-
-func (conn *TCPConn) ackSeq() error {
-	for {
-		buf := make([]byte, 1024)
-		numRead, addr, err := conn.ipconn.ReadFromIP(buf)
-		if err != nil {
-			return err
-		}
-
-		tcp := NewTCPHeader(buf[:numRead])
-		if parseIPv4(addr.IP.To4()) != conn.remoteIP || tcp.Source != conn.remotePort {
-			continue
-		}
-
-		if tcp.HasFlag(TCPFlagRst) {
-			return io.ErrClosedPipe
-		} else if tcp.HasFlag(TCPFlagPsh) { // record peer's sequence number
-			atomic.StoreUint32(&conn.acknum, tcp.SeqNum)
-			atomic.StoreUint32(&conn.seqnum, tcp.AckNum)
-		}
-	}
+	wg.Wait()
+	return payloadChan
 }
 
 // ReadFrom reads a packet from the connection,
@@ -207,7 +228,6 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, err
 	}
 
-	// increment on seqnum
 	atomic.AddUint32(&conn.seqnum, uint32(len(p)))
 	return len(p), nil
 }

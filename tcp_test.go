@@ -39,7 +39,6 @@ func handleRequest(conn net.Conn) {
 			return
 		}
 		data := buf[:size]
-		log.Println("Read new data from connection", data)
 		conn.Write(data)
 	}
 }
@@ -59,7 +58,7 @@ func TestDial(t *testing.T) {
 
 	buf := make([]byte, 1500)
 	n, addr, err := conn.ReadFrom(buf)
-	println(n)
+	log.Println("read:", n, addr)
 	if err != nil {
 		t.Fatal(err)
 	}
