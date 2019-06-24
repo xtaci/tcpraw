@@ -95,13 +95,6 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// a raw socket for sending
-	ipconn, err := net.Dial("ip4:tcp", raddr.IP.String())
-	if err != nil {
-		return nil, err
-	}
-	conn.ipconn = ipconn.(*net.IPConn)
-
 	// fields
 	conn.tcpconn = tcpconn
 	// discard data flow on tcp conn
@@ -212,10 +205,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 
 // Close closes the connection.
 // Any blocked ReadFrom or WriteTo operations will be unblocked and return errors.
-func (conn *TCPConn) Close() error {
-	conn.tcpconn.Close()
-	return conn.ipconn.Close()
-}
+func (conn *TCPConn) Close() error { return conn.tcpconn.Close() }
 
 // LocalAddr returns the local network address.
 func (conn *TCPConn) LocalAddr() net.Addr {
@@ -237,16 +227,16 @@ func (conn *TCPConn) LocalAddr() net.Addr {
 // the deadline after successful ReadFrom or WriteTo calls.
 //
 // A zero value for t means I/O operations will not time out.
-func (conn *TCPConn) SetDeadline(t time.Time) error { return conn.ipconn.SetDeadline(t) }
+func (conn *TCPConn) SetDeadline(t time.Time) error { return conn.tcpconn.SetDeadline(t) }
 
 // SetReadDeadline sets the deadline for future ReadFrom calls
 // and any currently-blocked ReadFrom call.
 // A zero value for t means ReadFrom will not time out.
-func (conn *TCPConn) SetReadDeadline(t time.Time) error { return conn.ipconn.SetReadDeadline(t) }
+func (conn *TCPConn) SetReadDeadline(t time.Time) error { return conn.tcpconn.SetReadDeadline(t) }
 
 // SetWriteDeadline sets the deadline for future WriteTo calls
 // and any currently-blocked WriteTo call.
 // Even if write times out, it may return n > 0, indicating that
 // some of the data was successfully written.
 // A zero value for t means WriteTo will not time out.
-func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return conn.ipconn.SetWriteDeadline(t) }
+func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return conn.tcpconn.SetWriteDeadline(t) }
