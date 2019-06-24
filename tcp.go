@@ -157,6 +157,10 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 			atomic.StoreUint32(&conn.acknum, transport.Seq)
 			atomic.StoreUint32(&conn.seqnum, transport.Ack)
 			once.Do(wg.Done)
+
+			if transport.PSH {
+				payloadChan <- transport.Payload
+			}
 		}
 	}()
 
@@ -175,23 +179,9 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 // an Error with Timeout() == true after a fixed time limit;
 // see SetDeadline and SetReadDeadline.
 func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	for {
-		buf := make([]byte, 1500)
-		if numRead, addr, err := conn.ipconn.ReadFromIP(buf); err == nil {
-			buf = buf[:numRead]
-			tcp := NewTCPHeader(buf)
-			if parseIPv4(addr.IP.To4()) != conn.remoteIP || tcp.Source != conn.remotePort {
-				continue
-			}
-			// Closed port gets RST, open port gets SYN ACK
-			if tcp.HasFlag(TCPFlagPsh) {
-				n := copy(p, buf[tcp.DataOffset<<2:])
-				return n, addr, nil
-			}
-		} else {
-			return numRead, addr, err
-		}
-	}
+	packet := <-conn.chPacket
+	n = copy(p, packet)
+	return n, conn.tcpconn.RemoteAddr(), nil
 }
 
 // WriteTo writes a packet with payload p to addr.

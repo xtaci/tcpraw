@@ -48,20 +48,16 @@ func TestDial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log(conn)
 
 	n, err := conn.WriteTo([]byte("a message"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	println(n)
 
 	buf := make([]byte, 1500)
 	n, addr, err := conn.ReadFrom(buf)
-	log.Println("read:", n, addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log(n, addr)
-	t.Log(string(buf[:n]))
+	t.Log(string(buf[:n]), "from:", addr)
 }
