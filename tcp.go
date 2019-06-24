@@ -202,25 +202,27 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-	gopacket.SerializeLayers(buf, opts,
-		&layers.Loopback{Family: layers.ProtocolFamilyIPv4},
-		&layers.IPv4{
-			SrcIP:    conn.tcpconn.LocalAddr().(*net.TCPAddr).IP,
-			DstIP:    conn.tcpconn.RemoteAddr().(*net.TCPAddr).IP,
-			Protocol: layers.IPProtocolTCP,
-			Version:  0x4,
-			Id:       1234,
-			Flags:    layers.IPv4DontFragment,
-			TTL:      0x40,
-		},
-		&layers.TCP{
-			SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
-			DstPort: layers.TCPPort(conn.tcpconn.RemoteAddr().(*net.TCPAddr).Port),
-			Window:  12580,
-			Ack:     atomic.LoadUint32(&conn.acknum) + 1,
-			Seq:     atomic.LoadUint32(&conn.seqnum),
-			PSH:     true,
-			ACK:     true,
+
+	link := &layers.Loopback{Family: layers.ProtocolFamilyIPv4}
+	network := &layers.IPv4{
+		SrcIP:    conn.tcpconn.LocalAddr().(*net.TCPAddr).IP,
+		DstIP:    conn.tcpconn.RemoteAddr().(*net.TCPAddr).IP,
+		Protocol: layers.IPProtocolTCP,
+		Version:  0x4,
+		Id:       1234,
+		Flags:    layers.IPv4DontFragment,
+		TTL:      0x40,
+	}
+
+	tcp := &layers.TCP{
+		SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
+		DstPort: layers.TCPPort(conn.tcpconn.RemoteAddr().(*net.TCPAddr).Port),
+		Window:  12580,
+		Ack:     atomic.LoadUint32(&conn.acknum),
+		Seq:     atomic.LoadUint32(&conn.seqnum),
+		PSH:     true,
+		ACK:     true,
+		/*
 			Options: []layers.TCPOption{{
 				OptionType:   layers.TCPOptionKindMSS,
 				OptionLength: 4,
@@ -233,10 +235,12 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 				OptionType:   layers.TCPOptionKindSACKPermitted,
 				OptionLength: 2,
 			}},
-		},
-		gopacket.Payload(p),
-	)
+		*/
+	}
+	tcp.SetNetworkLayerForChecksum(network)
+	payload := gopacket.Payload(p)
 
+	gopacket.SerializeLayers(buf, opts, link, network, tcp, payload)
 	if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
 		return 0, err
 	}
