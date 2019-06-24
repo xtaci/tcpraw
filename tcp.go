@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -35,6 +34,7 @@ type TCPConn struct {
 	remoteAddress string
 
 	// packet capture
+	handle   *pcap.Handle
 	pktsrc   *gopacket.PacketSource
 	chPacket chan []byte
 
@@ -81,6 +81,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn.handle = handle
 
 	laddr, err := net.ResolveTCPAddr("tcp", dummy.LocalAddr().String())
 	if err != nil {
@@ -190,33 +191,23 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 // see SetDeadline and SetWriteDeadline.
 // On packet-oriented connections, write timeouts are rare.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	// PSH
-	packet := TCPHeader{
-		Source:      uint16(conn.localPort),
-		Destination: uint16(conn.remotePort),
-		SeqNum:      atomic.LoadUint32(&conn.seqnum),
-		AckNum:      atomic.LoadUint32(&conn.acknum),
-		DataOffset:  5, // 4 bits
-		Reserved:    0, // 3 bits
-		ECN:         0, // 3 bits
-		Ctrl:        TCPFlagPsh | TCPFlagAck,
-		Window:      uint16(rand.Uint32()),
-		Checksum:    0,
-		Urgent:      0,
-		Options:     []TCPOption{},
-	}
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{}
+	gopacket.SerializeLayers(buf, opts,
+		&layers.TCP{
+			SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
+			DstPort: layers.TCPPort(conn.tcpconn.RemoteAddr().(*net.TCPAddr).Port),
+			Window:  65535,
+			Ack:     atomic.LoadUint32(&conn.acknum) + 1,
+			Seq:     atomic.LoadUint32(&conn.seqnum),
+			PSH:     true,
+		},
+	)
 
-	data := packet.Marshal()
-	packet.Checksum = Csum(data, conn.bLocalIP, conn.bRemoteIP)
-	data = packet.Marshal()
-
-	buf := make([]byte, len(data)+len(p))
-	copy(buf, data)
-	copy(buf[len(data):], p)
-
-	if _, err := conn.ipconn.Write(buf); err != nil {
+	if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
 		return 0, err
 	}
+	log.Println(err)
 
 	atomic.AddUint32(&conn.seqnum, uint32(len(p)))
 	return len(p), nil
