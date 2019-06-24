@@ -18,7 +18,6 @@ import (
 
 type TCPConn struct {
 	fd      int
-	ipconn  *net.IPConn
 	tcpconn *net.TCPConn
 
 	// packet capture
