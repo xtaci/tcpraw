@@ -37,8 +37,7 @@ type TCPConn struct {
 	handle    *pcap.Handle
 	pktsrc    *gopacket.PacketSource
 	chPacket  chan []byte
-	ethLayer  gopacket.Layer
-	loopLayer gopacket.Layer
+	linkLayer gopacket.SerializableLayer
 
 	// seq
 	seqnum uint32
@@ -160,8 +159,17 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 			atomic.StoreUint32(&conn.acknum, transport.Seq)
 			atomic.StoreUint32(&conn.seqnum, transport.Ack)
 			once.Do(func() {
-				conn.ethLayer = packet.Layer(layers.LayerTypeEthernet)
-				conn.loopLayer = packet.Layer(layers.LayerTypeLoopback)
+				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
+					ethLayer := layer.(*layers.Ethernet)
+					conn.linkLayer = &layers.Ethernet{
+						EthernetType: ethLayer.EthernetType,
+						SrcMAC:       ethLayer.DstMAC,
+						DstMAC:       ethLayer.SrcMAC,
+					}
+				} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
+					loopLayer := layer.(*layers.Loopback)
+					conn.linkLayer = &layers.Loopback{Family: loopLayer.Family}
+				}
 				wg.Done()
 			})
 
@@ -203,7 +211,6 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		ComputeChecksums: true,
 	}
 
-	link := &layers.Loopback{Family: layers.ProtocolFamilyIPv4}
 	network := &layers.IPv4{
 		SrcIP:    conn.tcpconn.LocalAddr().(*net.TCPAddr).IP,
 		DstIP:    conn.tcpconn.RemoteAddr().(*net.TCPAddr).IP,
@@ -240,7 +247,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	tcp.SetNetworkLayerForChecksum(network)
 	payload := gopacket.Payload(p)
 
-	gopacket.SerializeLayers(buf, opts, link, network, tcp, payload)
+	gopacket.SerializeLayers(buf, opts, conn.linkLayer, network, tcp, payload)
 	if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
 		return 0, err
 	}
