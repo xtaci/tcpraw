@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"testing"
+	"time"
 )
 
 //const testPort = "127.0.0.1:3456"
@@ -72,6 +73,7 @@ func handleRequest(conn net.Conn) {
 }
 
 func TestDialTCPStream(t *testing.T) {
+	<-time.After(30 * time.Second)
 	conn, err := Dial("tcp", testPortStream)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +103,7 @@ func TestDialToTCPPacket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", testPortStream)
+	addr, err := net.ResolveTCPAddr("tcp", testPortPacket)
 	if err != nil {
 		t.Fatal(err)
 	}

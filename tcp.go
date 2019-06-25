@@ -118,22 +118,7 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 		var once sync.Once
 		for packet := range source.Packets() {
 			transport := packet.TransportLayer().(*layers.TCP)
-			atomic.StoreUint32(&conn.Ack, transport.Seq)
 			atomic.StoreUint32(&conn.Seq, transport.Ack)
-			if transport.PSH {
-				// retrieve IP
-				var ip []byte
-				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-					network := layer.(*layers.IPv4)
-					ip = make([]byte, len(network.SrcIP))
-					copy(ip, network.SrcIP)
-				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
-					network := layer.(*layers.IPv6)
-					ip = make([]byte, len(network.SrcIP))
-					copy(ip, network.SrcIP)
-				}
-				conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}
-			}
 
 			once.Do(func() {
 				// link layer
@@ -173,6 +158,28 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 				}
 				close(conn.ready)
 			})
+
+			if transport.SYN {
+				if transport.Seq >= atomic.LoadUint32(&conn.Ack) {
+					atomic.StoreUint32(&conn.Ack, uint32(transport.Seq)+1)
+				}
+			} else if transport.PSH {
+				// retrieve IP
+				var ip []byte
+				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
+					network := layer.(*layers.IPv4)
+					ip = make([]byte, len(network.SrcIP))
+					copy(ip, network.SrcIP)
+				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
+					network := layer.(*layers.IPv6)
+					ip = make([]byte, len(network.SrcIP))
+					copy(ip, network.SrcIP)
+				}
+				conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}
+				if transport.Seq >= atomic.LoadUint32(&conn.Ack) {
+					atomic.StoreUint32(&conn.Ack, uint32(transport.Seq)+uint32(len(transport.Payload)))
+				}
+			}
 		}
 	}()
 }
@@ -218,13 +225,13 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		PSH:     true,
 		ACK:     true,
 	}
-	tcp.SetNetworkLayerForChecksum(conn.networkLayer.(gopacket.NetworkLayer))
 
 	if conn.tcpconn != nil {
 		tcp.SrcPort = layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port)
 	} else if conn.listener != nil {
 		tcp.SrcPort = layers.TCPPort(conn.listener.Addr().(*net.TCPAddr).Port)
 	}
+	tcp.SetNetworkLayerForChecksum(conn.networkLayer.(gopacket.NetworkLayer))
 
 	log.Printf("header: %+v", tcp)
 
@@ -235,7 +242,6 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, err
 	}
 
-	atomic.AddUint32(&conn.Seq, uint32(len(p)))
 	return len(p), nil
 }
 
