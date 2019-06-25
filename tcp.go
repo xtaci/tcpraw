@@ -13,6 +13,8 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 type Packet struct {
@@ -94,6 +96,13 @@ func Dial(network, address string) (*TCPConn, error) {
 	tcpconn, err := net.DialTCP(network, laddr, raddr)
 	if err != nil {
 		return nil, err
+	}
+
+	// prevent sending acks
+	if laddr.IP.To4() == nil {
+		ipv6.NewConn(tcpconn).SetHopLimit(0)
+	} else {
+		ipv4.NewConn(tcpconn).SetTTL(0)
 	}
 
 	// fields
@@ -336,7 +345,12 @@ func Listen(network, address string) (*Listener, error) {
 				return
 			}
 
-			// create newconn
+			// prevent sending any packets
+			if laddr.IP.To4() == nil {
+				ipv6.NewConn(conn).SetHopLimit(0)
+			} else {
+				ipv4.NewConn(conn).SetTTL(0)
+			}
 
 			go io.Copy(ioutil.Discard, conn)
 		}
