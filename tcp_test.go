@@ -42,7 +42,6 @@ func init() {
 				log.Println(err)
 				return
 			}
-			log.Println("packet:", buf[n:])
 
 			//echo
 			n, err = conn.WriteTo(buf[:n], addr)
