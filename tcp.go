@@ -184,9 +184,14 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 					ip = make([]byte, len(network.SrcIP))
 					copy(ip, network.SrcIP)
 				}
-				conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}
 				if transport.Seq >= atomic.LoadUint32(&conn.ack) {
 					atomic.StoreUint32(&conn.ack, uint32(transport.Seq)+uint32(len(transport.Payload)))
+				}
+
+				select {
+				case conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}:
+				case <-conn.die:
+					return
 				}
 			}
 		}
@@ -449,7 +454,6 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 				conn.flows[addr.String()] = e
 				conn.flowsLock.Unlock()
 			} else if transport.PSH {
-				conn.chPacket <- Packet{transport.Payload, addr}
 				conn.flowsLock.Lock()
 				e := conn.flows[addr.String()]
 				if transport.Seq > e.ack {
@@ -457,6 +461,12 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 				}
 				conn.flows[addr.String()] = e
 				conn.flowsLock.Unlock()
+
+				select {
+				case conn.chPacket <- Packet{transport.Payload, addr}:
+				case <-conn.die:
+					return
+				}
 			} else if transport.FIN {
 				conn.flowsLock.Lock()
 				delete(conn.flows, addr.String())
