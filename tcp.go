@@ -91,15 +91,13 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
 	conn.handle = handle
 	conn.tcpconn = tcpconn
-	// discard data flow on tcp conn
-	go conn.discard(tcpconn)
 	conn.chPacket = conn.receiver(gopacket.NewPacketSource(handle, handle.LinkType()))
+
+	// discards data flow on tcp conn, to keep the window slides
+	go io.Copy(ioutil.Discard, tcpconn)
 
 	return conn, nil
 }
-
-// dummy tcp reader to discard all data read from tcp conn
-func (conn *TCPConn) discard(r io.Reader) { io.Copy(ioutil.Discard, r) }
 
 // packet receiver
 func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
