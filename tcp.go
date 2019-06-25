@@ -274,6 +274,12 @@ func (conn *TCPConn) SetReadDeadline(t time.Time) error { return conn.tcpconn.Se
 // A zero value for t means WriteTo will not time out.
 func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return conn.tcpconn.SetWriteDeadline(t) }
 
+// TCPFlow information
+type TCPFlow struct {
+	seq uint32
+	ack uint32
+}
+
 // ListenerConn defines a TCP-packet oriented listener connection
 type Listener struct {
 	ready    chan struct{}
@@ -286,8 +292,8 @@ type Listener struct {
 	networkLayer gopacket.SerializableLayer // network layer header
 
 	// important TCP header information
-	seq uint32
-	ack uint32
+	flows     map[string]TCPFlow
+	flowsLock sync.Mutex
 }
 
 // TCPListener returns a TCP-packet oriented listener
@@ -336,6 +342,7 @@ func Listen(network, address string) (*Listener, error) {
 	// fields
 	conn := new(Listener)
 	conn.handle = handle
+	conn.flows = make(map[string]TCPFlow)
 	conn.listener = l
 	conn.startCapture(gopacket.NewPacketSource(handle, handle.LinkType()))
 
@@ -346,6 +353,8 @@ func Listen(network, address string) (*Listener, error) {
 			if err != nil {
 				return
 			}
+
+			// create newconn
 
 			go io.Copy(ioutil.Discard, conn)
 		}
@@ -399,7 +408,23 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 		var once sync.Once
 		for packet := range source.Packets() {
 			transport := packet.TransportLayer().(*layers.TCP)
-			atomic.StoreUint32(&conn.seq, transport.Ack)
+			var ip []byte
+			if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
+				network := layer.(*layers.IPv4)
+				ip = make([]byte, len(network.SrcIP))
+				copy(ip, network.SrcIP)
+			} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
+				network := layer.(*layers.IPv6)
+				ip = make([]byte, len(network.SrcIP))
+				copy(ip, network.SrcIP)
+			}
+			addr := &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}
+
+			conn.flowsLock.Lock()
+			e := conn.flows[addr.String()]
+			e.ack = transport.Ack
+			conn.flows[addr.String()] = e
+			conn.flowsLock.Unlock()
 
 			once.Do(func() {
 				// link layer
@@ -441,25 +466,26 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 			})
 
 			if transport.SYN {
-				if transport.Seq >= atomic.LoadUint32(&conn.ack) {
-					atomic.StoreUint32(&conn.ack, uint32(transport.Seq)+1)
+				conn.flowsLock.Lock()
+				e := conn.flows[addr.String()]
+				if transport.Seq > e.ack {
+					e.ack = uint32(transport.Seq) + 1
 				}
+				conn.flows[addr.String()] = e
+				conn.flowsLock.Unlock()
 			} else if transport.PSH {
-				// retrieve IP
-				var ip []byte
-				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-					network := layer.(*layers.IPv4)
-					ip = make([]byte, len(network.SrcIP))
-					copy(ip, network.SrcIP)
-				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
-					network := layer.(*layers.IPv6)
-					ip = make([]byte, len(network.SrcIP))
-					copy(ip, network.SrcIP)
+				conn.chPacket <- Packet{transport.Payload, addr}
+				conn.flowsLock.Lock()
+				e := conn.flows[addr.String()]
+				if transport.Seq > e.ack {
+					e.ack = uint32(transport.Seq) + uint32(len(transport.Payload))
 				}
-				conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}
-				if transport.Seq >= atomic.LoadUint32(&conn.ack) {
-					atomic.StoreUint32(&conn.ack, uint32(transport.Seq)+uint32(len(transport.Payload)))
-				}
+				conn.flows[addr.String()] = e
+				conn.flowsLock.Unlock()
+			} else if transport.FIN {
+				conn.flowsLock.Lock()
+				delete(conn.flows, addr.String())
+				conn.flowsLock.Unlock()
 			}
 		}
 	}()
@@ -498,12 +524,17 @@ func (conn *Listener) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
+
+	conn.flowsLock.Lock()
+	e := conn.flows[addr.String()]
+	conn.flowsLock.Unlock()
+
 	tcp := &layers.TCP{
 		SrcPort: layers.TCPPort(conn.listener.Addr().(*net.TCPAddr).Port),
 		DstPort: layers.TCPPort(tcpaddr.Port),
 		Window:  12580,
-		Ack:     atomic.LoadUint32(&conn.ack),
-		Seq:     atomic.LoadUint32(&conn.seq),
+		Ack:     e.ack,
+		Seq:     e.seq,
 		PSH:     true,
 		ACK:     true,
 	}
@@ -517,6 +548,10 @@ func (conn *Listener) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, err
 	}
 
-	atomic.AddUint32(&conn.seq, uint32(len(p)))
+	conn.flowsLock.Lock()
+	e = conn.flows[addr.String()]
+	e.seq += uint32(len(p))
+	conn.flows[addr.String()] = e
+	conn.flowsLock.Unlock()
 	return len(p), nil
 }
