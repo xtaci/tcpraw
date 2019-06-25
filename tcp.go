@@ -23,6 +23,8 @@ type Packet struct {
 // TCPConn defines a TCP-packet oriented connection
 type TCPConn struct {
 	ready   chan struct{}
+	die     chan struct{}
+	dieOnce sync.Once
 	tcpconn *net.TCPConn
 	// gopacket
 	handle       *pcap.Handle
@@ -96,7 +98,7 @@ func Dial(network, address string) (*TCPConn, error) {
 
 	// fields
 	conn := new(TCPConn)
-	conn.ready = make(chan struct{})
+	conn.die = make(chan struct{})
 	conn.handle = handle
 	conn.tcpconn = tcpconn
 	conn.startCapture(gopacket.NewPacketSource(handle, handle.LinkType()))
@@ -109,7 +111,7 @@ func Dial(network, address string) (*TCPConn, error) {
 
 // packet startCapture
 func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
-	conn.chPacket = make(chan Packet, 128)
+	conn.chPacket = make(chan Packet)
 	conn.ready = make(chan struct{})
 
 	go func() {
@@ -193,9 +195,13 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 // an Error with Timeout() == true after a fixed time limit;
 // see SetDeadline and SetReadDeadline.
 func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	packet := <-conn.chPacket
-	n = copy(p, packet.bts)
-	return n, packet.addr, nil
+	select {
+	case <-conn.die:
+		return 0, nil, io.EOF
+	case packet := <-conn.chPacket:
+		n = copy(p, packet.bts)
+		return n, packet.addr, nil
+	}
 }
 
 // WriteTo writes a packet with payload p to addr.
@@ -238,7 +244,15 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 
 // Close closes the connection.
 // Any blocked ReadFrom or WriteTo operations will be unblocked and return errors.
-func (conn *TCPConn) Close() error { return conn.tcpconn.Close() }
+func (conn *TCPConn) Close() error {
+	var err error
+	conn.dieOnce.Do(func() {
+		close(conn.die)
+		conn.handle.Close()
+		err = conn.tcpconn.Close()
+	})
+	return err
+}
 
 // LocalAddr returns the local network address.
 func (conn *TCPConn) LocalAddr() net.Addr {
@@ -283,6 +297,7 @@ type TCPFlow struct {
 // ListenerConn defines a TCP-packet oriented listener connection
 type Listener struct {
 	ready    chan struct{}
+	die      chan struct{}
 	listener *net.TCPListener
 	// gopacket
 	handle       *pcap.Handle
@@ -343,6 +358,7 @@ func Listen(network, address string) (*Listener, error) {
 	conn := new(Listener)
 	conn.handle = handle
 	conn.flows = make(map[string]TCPFlow)
+	conn.die = make(chan struct{})
 	conn.listener = l
 	conn.startCapture(gopacket.NewPacketSource(handle, handle.LinkType()))
 
@@ -502,9 +518,13 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 // an Error with Timeout() == true after a fixed time limit;
 // see SetDeadline and SetReadDeadline.
 func (conn *Listener) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	packet := <-conn.chPacket
-	n = copy(p, packet.bts)
-	return n, packet.addr, nil
+	select {
+	case <-conn.die:
+		return 0, nil, io.EOF
+	case packet := <-conn.chPacket:
+		n = copy(p, packet.bts)
+		return n, packet.addr, nil
+	}
 }
 
 // WriteTo writes a packet with payload p to addr.
