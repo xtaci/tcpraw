@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ type Packet struct {
 
 // TCPConn defines a TCP-packet oriented connection
 type TCPConn struct {
+	ready    chan struct{}
 	tcpconn  *net.TCPConn
 	listener *net.TCPListener
 	// gopacket
@@ -96,9 +98,10 @@ func Dial(network, address string) (*TCPConn, error) {
 
 	// fields
 	conn := new(TCPConn)
+	conn.ready = make(chan struct{})
 	conn.handle = handle
 	conn.tcpconn = tcpconn
-	conn.chPacket = conn.receiver(gopacket.NewPacketSource(handle, handle.LinkType()))
+	conn.startCapture(gopacket.NewPacketSource(handle, handle.LinkType()))
 
 	// discards data flow on tcp conn, to keep the window slides
 	go io.Copy(ioutil.Discard, tcpconn)
@@ -106,11 +109,10 @@ func Dial(network, address string) (*TCPConn, error) {
 	return conn, nil
 }
 
-// packet receiver
-func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan Packet {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	payloadChan := make(chan Packet, 128)
+// packet startCapture
+func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
+	conn.chPacket = make(chan Packet, 128)
+	conn.ready = make(chan struct{})
 
 	go func() {
 		var once sync.Once
@@ -130,7 +132,7 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan Packet {
 					ip = make([]byte, len(network.SrcIP))
 					copy(ip, network.SrcIP)
 				}
-				payloadChan <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}
+				conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}
 			}
 
 			once.Do(func() {
@@ -169,15 +171,10 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan Packet {
 						HopLimit:   0x40,
 					}
 				}
-
-				wg.Done()
+				close(conn.ready)
 			})
-
 		}
 	}()
-
-	wg.Wait()
-	return payloadChan
 }
 
 // ReadFrom reads a packet from the connection,
@@ -202,15 +199,19 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 // see SetDeadline and SetWriteDeadline.
 // On packet-oriented connections, write timeouts are rare.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	<-conn.ready
+	tcpaddr, err := net.ResolveTCPAddr("tcp", addr.String())
+	if err != nil {
+		return 0, err
+	}
+
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-
 	tcp := &layers.TCP{
-		SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
-		DstPort: layers.TCPPort(conn.tcpconn.RemoteAddr().(*net.TCPAddr).Port),
+		DstPort: layers.TCPPort(tcpaddr.Port),
 		Window:  12580,
 		Ack:     atomic.LoadUint32(&conn.Ack),
 		Seq:     atomic.LoadUint32(&conn.Seq),
@@ -218,6 +219,15 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		ACK:     true,
 	}
 	tcp.SetNetworkLayerForChecksum(conn.networkLayer.(gopacket.NetworkLayer))
+
+	if conn.tcpconn != nil {
+		tcp.SrcPort = layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port)
+	} else if conn.listener != nil {
+		tcp.SrcPort = layers.TCPPort(conn.listener.Addr().(*net.TCPAddr).Port)
+	}
+
+	log.Printf("header: %+v", tcp)
+
 	payload := gopacket.Payload(p)
 
 	gopacket.SerializeLayers(buf, opts, conn.linkLayer, conn.networkLayer, tcp, payload)
@@ -269,13 +279,7 @@ func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return conn.tcpconn.S
 
 // TCPListener returns a TCP-packet oriented listener
 func Listen(network, address string) (*TCPConn, error) {
-	// start listening
 	laddr, err := net.ResolveTCPAddr(network, address)
-	if err != nil {
-		return nil, err
-	}
-
-	l, err := net.ListenTCP(network, laddr)
 	if err != nil {
 		return nil, err
 	}
@@ -304,6 +308,12 @@ func Listen(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
+	// start listening
+	l, err := net.ListenTCP(network, laddr)
+	if err != nil {
+		return nil, err
+	}
+
 	// apply filter for incoming data
 	filter := fmt.Sprintf("tcp and dst host %v and dst port %v", laddr.IP, laddr.Port)
 	if err := handle.SetBPFFilter(filter); err != nil {
@@ -314,7 +324,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
 	conn.handle = handle
 	conn.listener = l
-	conn.chPacket = conn.receiver(gopacket.NewPacketSource(handle, handle.LinkType()))
+	conn.startCapture(gopacket.NewPacketSource(handle, handle.LinkType()))
 
 	// discard everything in original connection
 	go func() {
