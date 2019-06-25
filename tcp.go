@@ -184,16 +184,7 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 	}()
 }
 
-// ReadFrom reads a packet from the connection,
-// copying the payload into p. It returns the number of
-// bytes copied into p and the return address that
-// was on the packet.
-// It returns the number of bytes read (0 <= n <= len(p))
-// and any error encountered. Callers should always process
-// the n > 0 bytes returned before considering the error err.
-// ReadFrom can be made to time out and return
-// an Error with Timeout() == true after a fixed time limit;
-// see SetDeadline and SetReadDeadline.
+// ReadFrom implements the PacketConn ReadFrom method.
 func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	select {
 	case <-conn.die:
@@ -204,11 +195,7 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	}
 }
 
-// WriteTo writes a packet with payload p to addr.
-// WriteTo can be made to time out and return
-// an Error with Timeout() == true after a fixed time limit;
-// see SetDeadline and SetWriteDeadline.
-// On packet-oriented connections, write timeouts are rare.
+// WriteTo implements the PacketConn WriteTo method.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	<-conn.ready
 	tcpaddr, err := net.ResolveTCPAddr("tcp", addr.String())
@@ -243,7 +230,6 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 }
 
 // Close closes the connection.
-// Any blocked ReadFrom or WriteTo operations will be unblocked and return errors.
 func (conn *TCPConn) Close() error {
 	var err error
 	conn.dieOnce.Do(func() {
@@ -259,33 +245,13 @@ func (conn *TCPConn) LocalAddr() net.Addr {
 	return conn.tcpconn.LocalAddr()
 }
 
-// SetDeadline sets the read and write deadlines associated
-// with the connection. It is equivalent to calling both
-// SetReadDeadline and SetWriteDeadline.
-//
-// A deadline is an absolute time after which I/O operations
-// fail with a timeout (see type Error) instead of
-// blocking. The deadline applies to all future and pending
-// I/O, not just the immediately following call to ReadFrom or
-// WriteTo. After a deadline has been exceeded, the connection
-// can be refreshed by setting a deadline in the future.
-//
-// An idle timeout can be implemented by repeatedly extending
-// the deadline after successful ReadFrom or WriteTo calls.
-//
-// A zero value for t means I/O operations will not time out.
+// SetDeadline implements the Conn SetDeadline method.
 func (conn *TCPConn) SetDeadline(t time.Time) error { return conn.tcpconn.SetDeadline(t) }
 
-// SetReadDeadline sets the deadline for future ReadFrom calls
-// and any currently-blocked ReadFrom call.
-// A zero value for t means ReadFrom will not time out.
+// SetReadDeadline implements the Conn SetReadDeadline method.
 func (conn *TCPConn) SetReadDeadline(t time.Time) error { return conn.tcpconn.SetReadDeadline(t) }
 
-// SetWriteDeadline sets the deadline for future WriteTo calls
-// and any currently-blocked WriteTo call.
-// Even if write times out, it may return n > 0, indicating that
-// some of the data was successfully written.
-// A zero value for t means WriteTo will not time out.
+// SetWriteDeadline implements the Conn SetWriteDeadline method.
 func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return conn.tcpconn.SetWriteDeadline(t) }
 
 // TCPFlow information
@@ -294,7 +260,7 @@ type TCPFlow struct {
 	ack uint32
 }
 
-// ListenerConn defines a TCP-packet oriented listener connection
+// Listener defines a TCP-packet oriented listener connection
 type Listener struct {
 	ready    chan struct{}
 	die      chan struct{}
@@ -380,39 +346,18 @@ func Listen(network, address string) (*Listener, error) {
 }
 
 // Close closes the connection.
-// Any blocked ReadFrom or WriteTo operations will be unblocked and return errors.
 func (conn *Listener) Close() error { return conn.listener.Close() }
 
 // LocalAddr returns the local network address.
 func (conn *Listener) LocalAddr() net.Addr { return conn.listener.Addr() }
 
-// SetDeadline sets the read and write deadlines associated
-// with the connection. It is equivalent to calling both
-// SetReadDeadline and SetWriteDeadline.
-//
-// A deadline is an absolute time after which I/O operations
-// fail with a timeout (see type Error) instead of
-// blocking. The deadline applies to all future and pending
-// I/O, not just the immediately following call to ReadFrom or
-// WriteTo. After a deadline has been exceeded, the connection
-// can be refreshed by setting a deadline in the future.
-//
-// An idle timeout can be implemented by repeatedly extending
-// the deadline after successful ReadFrom or WriteTo calls.
-//
-// A zero value for t means I/O operations will not time out.
+// SetDeadline implements the Conn SetDeadline method.
 func (conn *Listener) SetDeadline(t time.Time) error { return conn.listener.SetDeadline(t) }
 
-// SetReadDeadline sets the deadline for future ReadFrom calls
-// and any currently-blocked ReadFrom call.
-// A zero value for t means ReadFrom will not time out.
+// SetReadDeadline implements the Conn SetReadDeadline method.
 func (conn *Listener) SetReadDeadline(t time.Time) error { return errors.New("invalid ops") }
 
-// SetWriteDeadline sets the deadline for future WriteTo calls
-// and any currently-blocked WriteTo call.
-// Even if write times out, it may return n > 0, indicating that
-// some of the data was successfully written.
-// A zero value for t means WriteTo will not time out.
+// SetWriteDeadline implements the Conn SetWriteDeadline method.
 func (conn *Listener) SetWriteDeadline(t time.Time) error { return errors.New("invalid ops") }
 
 // packet startCapture
@@ -507,16 +452,7 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 	}()
 }
 
-// ReadFrom reads a packet from the connection,
-// copying the payload into p. It returns the number of
-// bytes copied into p and the return address that
-// was on the packet.
-// It returns the number of bytes read (0 <= n <= len(p))
-// and any error encountered. Callers should always process
-// the n > 0 bytes returned before considering the error err.
-// ReadFrom can be made to time out and return
-// an Error with Timeout() == true after a fixed time limit;
-// see SetDeadline and SetReadDeadline.
+// ReadFrom implements the PacketConn ReadFrom method.
 func (conn *Listener) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	select {
 	case <-conn.die:
@@ -527,11 +463,7 @@ func (conn *Listener) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	}
 }
 
-// WriteTo writes a packet with payload p to addr.
-// WriteTo can be made to time out and return
-// an Error with Timeout() == true after a fixed time limit;
-// see SetDeadline and SetWriteDeadline.
-// On packet-oriented connections, write timeouts are rare.
+// WriteTo implements the PacketConn WriteTo method.
 func (conn *Listener) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	<-conn.ready
 	tcpaddr, err := net.ResolveTCPAddr("tcp", addr.String())
