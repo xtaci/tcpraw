@@ -34,8 +34,8 @@ type TCPConn struct {
 	networkLayer gopacket.SerializableLayer // network layer header
 
 	// important TCP header information
-	Seq uint32
-	Ack uint32
+	seq uint32
+	ack uint32
 }
 
 // Dial connects to the remote TCP port
@@ -118,7 +118,7 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 		var once sync.Once
 		for packet := range source.Packets() {
 			transport := packet.TransportLayer().(*layers.TCP)
-			atomic.StoreUint32(&conn.Seq, transport.Ack)
+			atomic.StoreUint32(&conn.seq, transport.Ack)
 
 			once.Do(func() {
 				// link layer
@@ -160,8 +160,8 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 			})
 
 			if transport.SYN {
-				if transport.Seq >= atomic.LoadUint32(&conn.Ack) {
-					atomic.StoreUint32(&conn.Ack, uint32(transport.Seq)+1)
+				if transport.Seq >= atomic.LoadUint32(&conn.ack) {
+					atomic.StoreUint32(&conn.ack, uint32(transport.Seq)+1)
 				}
 			} else if transport.PSH {
 				// retrieve IP
@@ -176,8 +176,8 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 					copy(ip, network.SrcIP)
 				}
 				conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}
-				if transport.Seq >= atomic.LoadUint32(&conn.Ack) {
-					atomic.StoreUint32(&conn.Ack, uint32(transport.Seq)+uint32(len(transport.Payload)))
+				if transport.Seq >= atomic.LoadUint32(&conn.ack) {
+					atomic.StoreUint32(&conn.ack, uint32(transport.Seq)+uint32(len(transport.Payload)))
 				}
 			}
 		}
@@ -220,8 +220,8 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	tcp := &layers.TCP{
 		DstPort: layers.TCPPort(tcpaddr.Port),
 		Window:  12580,
-		Ack:     atomic.LoadUint32(&conn.Ack),
-		Seq:     atomic.LoadUint32(&conn.Seq),
+		Ack:     atomic.LoadUint32(&conn.ack),
+		Seq:     atomic.LoadUint32(&conn.seq),
 		PSH:     true,
 		ACK:     true,
 	}
@@ -242,6 +242,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, err
 	}
 
+	atomic.AddUint32(&conn.seq, uint32(len(p)))
 	return len(p), nil
 }
 
