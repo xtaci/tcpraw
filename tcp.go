@@ -15,13 +15,19 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
+type Packet struct {
+	bts  []byte
+	addr net.Addr
+}
+
 // TCPConn defines a TCP-packet oriented connection
 type TCPConn struct {
-	tcpconn *net.TCPConn
+	tcpconn  *net.TCPConn
+	listener *net.TCPListener
 	// gopacket
 	handle       *pcap.Handle
 	packetSource *gopacket.PacketSource
-	chPacket     chan []byte                // incoming packets channel
+	chPacket     chan Packet                // incoming packets channel
 	linkLayer    gopacket.SerializableLayer // link layer header
 	networkLayer gopacket.SerializableLayer // network layer header
 
@@ -101,10 +107,10 @@ func Dial(network, address string) (*TCPConn, error) {
 }
 
 // packet receiver
-func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
+func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan Packet {
 	var wg sync.WaitGroup
 	wg.Add(1)
-	payloadChan := make(chan []byte, 128)
+	payloadChan := make(chan Packet, 128)
 
 	go func() {
 		var once sync.Once
@@ -112,6 +118,21 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 			transport := packet.TransportLayer().(*layers.TCP)
 			atomic.StoreUint32(&conn.Ack, transport.Seq)
 			atomic.StoreUint32(&conn.Seq, transport.Ack)
+			if transport.PSH {
+				// retrieve IP
+				var ip []byte
+				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
+					network := layer.(*layers.IPv4)
+					ip = make([]byte, len(network.SrcIP))
+					copy(ip, network.SrcIP)
+				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
+					network := layer.(*layers.IPv6)
+					ip = make([]byte, len(network.SrcIP))
+					copy(ip, network.SrcIP)
+				}
+				payloadChan <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}
+			}
+
 			once.Do(func() {
 				// link layer
 				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
@@ -152,9 +173,6 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 				wg.Done()
 			})
 
-			if transport.PSH {
-				payloadChan <- transport.Payload
-			}
 		}
 	}()
 
@@ -174,8 +192,8 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 // see SetDeadline and SetReadDeadline.
 func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	packet := <-conn.chPacket
-	n = copy(p, packet)
-	return n, conn.tcpconn.RemoteAddr(), nil
+	n = copy(p, packet.bts)
+	return n, packet.addr, nil
 }
 
 // WriteTo writes a packet with payload p to addr.
@@ -248,3 +266,67 @@ func (conn *TCPConn) SetReadDeadline(t time.Time) error { return conn.tcpconn.Se
 // some of the data was successfully written.
 // A zero value for t means WriteTo will not time out.
 func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return conn.tcpconn.SetWriteDeadline(t) }
+
+// TCPListener returns a TCP-packet oriented listener
+func Listen(network, address string) (*TCPConn, error) {
+	// start listening
+	laddr, err := net.ResolveTCPAddr(network, address)
+	if err != nil {
+		return nil, err
+	}
+
+	l, err := net.ListenTCP(network, laddr)
+	if err != nil {
+		return nil, err
+	}
+
+	// get iface name from the dummy connection, eg. eth0, lo0
+	ifaces, err := pcap.FindAllDevs()
+	if err != nil {
+		return nil, err
+	}
+
+	var ifaceName string
+	for _, iface := range ifaces {
+		for _, addr := range iface.Addresses {
+			if addr.IP.Equal(laddr.IP) {
+				ifaceName = iface.Name
+			}
+		}
+	}
+	if ifaceName == "" {
+		return nil, errors.New("cannot find correct interface")
+	}
+
+	// pcap init
+	handle, err := pcap.OpenLive(ifaceName, 65536, true, time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	// apply filter for incoming data
+	filter := fmt.Sprintf("tcp and dst host %v and dst port %v", laddr.IP, laddr.Port)
+	if err := handle.SetBPFFilter(filter); err != nil {
+		return nil, err
+	}
+
+	// fields
+	conn := new(TCPConn)
+	conn.handle = handle
+	conn.listener = l
+	conn.chPacket = conn.receiver(gopacket.NewPacketSource(handle, handle.LinkType()))
+
+	// discard everything in original connection
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+
+			go io.Copy(ioutil.Discard, conn)
+		}
+	}()
+
+	return conn, nil
+}
