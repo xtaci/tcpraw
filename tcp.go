@@ -23,6 +23,7 @@ type TCPConn struct {
 	packetSource *gopacket.PacketSource
 	chPacket     chan []byte                // incoming packets channel
 	linkLayer    gopacket.SerializableLayer // link layer header
+	networkLayer gopacket.SerializableLayer // network layer header
 
 	// important TCP header information
 	Seq uint32
@@ -112,6 +113,7 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 			atomic.StoreUint32(&conn.Ack, transport.Seq)
 			atomic.StoreUint32(&conn.Seq, transport.Ack)
 			once.Do(func() {
+				// link layer
 				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
 					ethLayer := layer.(*layers.Ethernet)
 					conn.linkLayer = &layers.Ethernet{
@@ -123,6 +125,30 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 					loopLayer := layer.(*layers.Loopback)
 					conn.linkLayer = &layers.Loopback{Family: loopLayer.Family}
 				}
+
+				// network layer
+				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
+					network := layer.(*layers.IPv4)
+					conn.networkLayer = &layers.IPv4{
+						SrcIP:    network.DstIP,
+						DstIP:    network.SrcIP,
+						Protocol: network.Protocol,
+						Version:  network.Version,
+						Id:       network.Id,
+						Flags:    layers.IPv4DontFragment,
+						TTL:      0x40,
+					}
+				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
+					network := layer.(*layers.IPv6)
+					conn.networkLayer = &layers.IPv6{
+						Version:    network.Version,
+						NextHeader: network.NextHeader,
+						SrcIP:      network.DstIP,
+						DstIP:      network.SrcIP,
+						HopLimit:   0x40,
+					}
+				}
+
 				wg.Done()
 			})
 
@@ -164,16 +190,6 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		ComputeChecksums: true,
 	}
 
-	network := &layers.IPv4{
-		SrcIP:    conn.tcpconn.LocalAddr().(*net.TCPAddr).IP,
-		DstIP:    conn.tcpconn.RemoteAddr().(*net.TCPAddr).IP,
-		Protocol: layers.IPProtocolTCP,
-		Version:  0x4,
-		Id:       1234,
-		Flags:    layers.IPv4DontFragment,
-		TTL:      0x40,
-	}
-
 	tcp := &layers.TCP{
 		SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
 		DstPort: layers.TCPPort(conn.tcpconn.RemoteAddr().(*net.TCPAddr).Port),
@@ -183,10 +199,10 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		PSH:     true,
 		ACK:     true,
 	}
-	tcp.SetNetworkLayerForChecksum(network)
+	tcp.SetNetworkLayerForChecksum(conn.networkLayer.(gopacket.NetworkLayer))
 	payload := gopacket.Payload(p)
 
-	gopacket.SerializeLayers(buf, opts, conn.linkLayer, network, tcp, payload)
+	gopacket.SerializeLayers(buf, opts, conn.linkLayer, conn.networkLayer, tcp, payload)
 	if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
 		return 0, err
 	}
