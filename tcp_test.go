@@ -82,7 +82,7 @@ func TestDialTCPStream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := conn.WriteTo([]byte("a message"), addr)
+	n, err := conn.WriteTo([]byte("abc"), addr)
 	if err != nil {
 		t.Fatal(n, err)
 	}
@@ -106,7 +106,7 @@ func TestDialToTCPPacket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := conn.WriteTo([]byte("a packet"), addr)
+	n, err := conn.WriteTo([]byte("abc"), addr)
 	if err != nil {
 		t.Fatal(n, err)
 	}
