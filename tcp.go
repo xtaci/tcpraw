@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -16,38 +15,35 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
+// TCPConn defines a TCP-packet oriented connection
 type TCPConn struct {
-	fd      int
 	tcpconn *net.TCPConn
+	// gopacket
+	handle       *pcap.Handle
+	packetSource *gopacket.PacketSource
+	chPacket     chan []byte                // incoming packets channel
+	linkLayer    gopacket.SerializableLayer // link layer header
 
-	// packet capture
-	handle    *pcap.Handle
-	pktsrc    *gopacket.PacketSource
-	chPacket  chan []byte
-	linkLayer gopacket.SerializableLayer
-
-	// seq
-	seqnum uint32
-	// ack
-	acknum uint32
+	// important TCP header information
+	Seq uint32
+	Ack uint32
 }
 
+// Dial connects to the remote TCP port
 func Dial(network, address string) (*TCPConn, error) {
-	conn := new(TCPConn)
-
 	// remote address resolve
 	raddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err
 	}
 
-	// udp dummy
-	dummy, err := net.Dial("udp4", address)
+	// create a dummy UDP socket, to get routing information
+	dummy, err := net.Dial("udp", address)
 	if err != nil {
 		return nil, err
 	}
 
-	// get iface name from the dummy connection
+	// get iface name from the dummy connection, eg. eth0, lo0
 	ifaces, err := pcap.FindAllDevs()
 	if err != nil {
 		return nil, err
@@ -65,36 +61,35 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, errors.New("cannot find correct interface")
 	}
 
-	handle, err := pcap.OpenLive(ifaceName, 65536, true, time.Millisecond)
+	// pcap init
+	handle, err := pcap.OpenLive(ifaceName, 65536, true, time.Second)
 	if err != nil {
 		return nil, err
 	}
-	conn.handle = handle
 
-	laddr, err := net.ResolveTCPAddr("tcp", dummy.LocalAddr().String())
+	// TCP local address reuses the same address from UDP
+	laddr, err := net.ResolveTCPAddr(network, dummy.LocalAddr().String())
 	if err != nil {
 		return nil, err
 	}
 	dummy.Close()
 
-	// apply filter
-	filter := "tcp and dst host " + laddr.IP.String() +
-		" and dst port " + fmt.Sprint(laddr.Port) +
-		" and src host " + raddr.IP.String() +
-		" and src port " + fmt.Sprint(raddr.Port)
-	log.Println(filter)
+	// apply filter for incoming data
+	filter := fmt.Sprintf("tcp and dst host %v and dst port %v and src host %v and src port %v", laddr.IP, laddr.Port, raddr.IP, raddr.Port)
 	if err := handle.SetBPFFilter(filter); err != nil {
 		return nil, err
 	}
 
 	// create an established tcp connection
 	// will hack this tcp connection for packet transmission
-	tcpconn, err := net.DialTCP("tcp", laddr, raddr)
+	tcpconn, err := net.DialTCP(network, laddr, raddr)
 	if err != nil {
 		return nil, err
 	}
 
 	// fields
+	conn := new(TCPConn)
+	conn.handle = handle
 	conn.tcpconn = tcpconn
 	// discard data flow on tcp conn
 	go conn.discard(tcpconn)
@@ -116,8 +111,8 @@ func (conn *TCPConn) receiver(source *gopacket.PacketSource) chan []byte {
 		var once sync.Once
 		for packet := range source.Packets() {
 			transport := packet.TransportLayer().(*layers.TCP)
-			atomic.StoreUint32(&conn.acknum, transport.Seq)
-			atomic.StoreUint32(&conn.seqnum, transport.Ack)
+			atomic.StoreUint32(&conn.Ack, transport.Seq)
+			atomic.StoreUint32(&conn.Seq, transport.Ack)
 			once.Do(func() {
 				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
 					ethLayer := layer.(*layers.Ethernet)
@@ -185,8 +180,8 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
 		DstPort: layers.TCPPort(conn.tcpconn.RemoteAddr().(*net.TCPAddr).Port),
 		Window:  12580,
-		Ack:     atomic.LoadUint32(&conn.acknum),
-		Seq:     atomic.LoadUint32(&conn.seqnum),
+		Ack:     atomic.LoadUint32(&conn.Ack),
+		Seq:     atomic.LoadUint32(&conn.Seq),
 		PSH:     true,
 		ACK:     true,
 	}
@@ -198,7 +193,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, err
 	}
 
-	atomic.AddUint32(&conn.seqnum, uint32(len(p)))
+	atomic.AddUint32(&conn.Seq, uint32(len(p)))
 	return len(p), nil
 }
 
