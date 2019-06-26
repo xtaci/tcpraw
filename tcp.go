@@ -72,6 +72,8 @@ func (conn *TCPConn) captureFlow(source *gopacket.PacketSource) {
 		var once sync.Once
 		for packet := range source.Packets() {
 			transport := packet.TransportLayer().(*layers.TCP)
+
+			// build address
 			var ip []byte
 			if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
 				network := layer.(*layers.IPv4)
@@ -84,9 +86,8 @@ func (conn *TCPConn) captureFlow(source *gopacket.PacketSource) {
 			}
 			addr := &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}
 
-			conn.lockflow(addr, func(e *tcpFlow) {
-				e.seq = transport.Ack // seq update
-			})
+			// follow sequence number
+			conn.lockflow(addr, func(e *tcpFlow) { e.seq = transport.Ack })
 
 			once.Do(func() {
 				// link layer
