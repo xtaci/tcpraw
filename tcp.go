@@ -326,8 +326,6 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// prevent tcpconn from sending ACKs
-
 	// fields
 	conn := new(TCPConn)
 	conn.server = false
@@ -338,7 +336,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.localAddr = tcpconn.LocalAddr().(*net.TCPAddr)
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
-	conn.setTTL(tcpconn, 0)
+	conn.setTTL(tcpconn, 0) // prevent tcpconn from sending ACKs
 
 	// discards data flow on tcp conn, to keep the window slides
 	go io.Copy(ioutil.Discard, tcpconn)
@@ -361,7 +359,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	}
 
 	var handles []*pcap.Handle
-	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all iface
+	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all ifaces
 		for _, iface := range ifaces {
 			if len(iface.Addresses) > 0 {
 				// try open on all nics
@@ -373,11 +371,10 @@ func Listen(network, address string) (*TCPConn, error) {
 					}
 
 					handles = append(handles, handle)
+				} else {
+					return nil, err
 				}
 			}
-		}
-		if len(handles) == 0 {
-			return nil, errors.New("cannot find any interface")
 		}
 	} else {
 		var ifaceName string
@@ -432,8 +429,7 @@ func Listen(network, address string) (*TCPConn, error) {
 				return
 			}
 
-			// prevent conn from sending ACKs
-			conn.setTTL(tcpconn, 0)
+			conn.setTTL(tcpconn, 0) // prevent conn from sending ACKs
 			go io.Copy(ioutil.Discard, tcpconn)
 		}
 	}()
