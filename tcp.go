@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,11 @@ import (
 	"github.com/google/gopacket/pcap"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
+)
+
+var (
+	errOpNotImplemented = errors.New("operation not implemented")
+	source              = rand.NewSource(time.Now().UnixNano())
 )
 
 type Packet struct {
@@ -28,6 +34,7 @@ type TCPConn struct {
 	die     chan struct{}
 	dieOnce sync.Once
 	tcpconn *net.TCPConn
+
 	// gopacket
 	handle       *pcap.Handle
 	packetSource *gopacket.PacketSource
@@ -98,7 +105,7 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// prevent sending acks
+	// prevent tcpconn from sending ACKs
 	if laddr.IP.To4() == nil {
 		ipv6.NewConn(tcpconn).SetHopLimit(0)
 	} else {
@@ -118,7 +125,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	return conn, nil
 }
 
-// packet startCapture
+// startCapture capture all packets flow and track necessary information
 func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 	conn.chPacket = make(chan Packet)
 	conn.ready = make(chan struct{})
@@ -127,9 +134,13 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 		var once sync.Once
 		for packet := range source.Packets() {
 			transport := packet.TransportLayer().(*layers.TCP)
+			// store sn from ack, sn is updated from remote
+			// and will increase monotonically for each outgoing packet
 			atomic.StoreUint32(&conn.seq, transport.Ack)
 
 			once.Do(func() {
+				// initialization of link layer & network layer data for outgoing packets,
+				// suppose these 2 layers will not change during the conversation.
 				// link layer
 				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
 					ethLayer := layer.(*layers.Ethernet)
@@ -153,7 +164,7 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 						Version:  network.Version,
 						Id:       network.Id,
 						Flags:    layers.IPv4DontFragment,
-						TTL:      0x40,
+						TTL:      64,
 					}
 				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
 					network := layer.(*layers.IPv6)
@@ -162,18 +173,21 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 						NextHeader: network.NextHeader,
 						SrcIP:      network.DstIP,
 						DstIP:      network.SrcIP,
-						HopLimit:   0x40,
+						HopLimit:   64,
 					}
 				}
+
+				// record the ISN for ack
+				atomic.StoreUint32(&conn.ack, transport.Seq)
+
 				close(conn.ready)
 			})
 
 			if transport.SYN {
-				if transport.Seq >= atomic.LoadUint32(&conn.ack) {
-					atomic.StoreUint32(&conn.ack, uint32(transport.Seq)+1)
-				}
-			} else if transport.PSH {
-				// retrieve IP
+				atomic.AddUint32(&conn.ack, 1)
+			}
+			if transport.PSH {
+				// build packet address in net.Addr format
 				var ip []byte
 				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
 					network := layer.(*layers.IPv4)
@@ -184,9 +198,7 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 					ip = make([]byte, len(network.SrcIP))
 					copy(ip, network.SrcIP)
 				}
-				if transport.Seq >= atomic.LoadUint32(&conn.ack) {
-					atomic.StoreUint32(&conn.ack, uint32(transport.Seq)+uint32(len(transport.Payload)))
-				}
+				atomic.AddUint32(&conn.ack, uint32(len(transport.Payload)))
 
 				select {
 				case conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}:
@@ -211,36 +223,40 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 
 // WriteTo implements the PacketConn WriteTo method.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	<-conn.ready
-	tcpaddr, err := net.ResolveTCPAddr("tcp", addr.String())
-	if err != nil {
-		return 0, err
-	}
+	select {
+	case <-conn.ready: // wait until initialization
+		tcpaddr, err := net.ResolveTCPAddr("tcp", addr.String())
+		if err != nil {
+			return 0, err
+		}
 
-	buf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-	tcp := &layers.TCP{
-		SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
-		DstPort: layers.TCPPort(tcpaddr.Port),
-		Window:  12580,
-		Ack:     atomic.LoadUint32(&conn.ack),
-		Seq:     atomic.LoadUint32(&conn.seq),
-		PSH:     true,
-		ACK:     true,
-	}
-	tcp.SetNetworkLayerForChecksum(conn.networkLayer.(gopacket.NetworkLayer))
-	payload := gopacket.Payload(p)
+		buf := gopacket.NewSerializeBuffer()
+		opts := gopacket.SerializeOptions{
+			FixLengths:       true,
+			ComputeChecksums: true,
+		}
+		tcp := &layers.TCP{
+			SrcPort: layers.TCPPort(conn.tcpconn.LocalAddr().(*net.TCPAddr).Port),
+			DstPort: layers.TCPPort(tcpaddr.Port),
+			Window:  uint16(source.Int63()),
+			Ack:     atomic.LoadUint32(&conn.ack),
+			Seq:     atomic.LoadUint32(&conn.seq),
+			PSH:     true,
+			ACK:     true,
+		}
+		tcp.SetNetworkLayerForChecksum(conn.networkLayer.(gopacket.NetworkLayer))
+		payload := gopacket.Payload(p)
 
-	gopacket.SerializeLayers(buf, opts, conn.linkLayer, conn.networkLayer, tcp, payload)
-	if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
-		return 0, err
-	}
+		gopacket.SerializeLayers(buf, opts, conn.linkLayer, conn.networkLayer, tcp, payload)
+		if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
+			return 0, err
+		}
 
-	atomic.AddUint32(&conn.seq, uint32(len(p)))
-	return len(p), nil
+		atomic.AddUint32(&conn.seq, uint32(len(p)))
+		return len(p), nil
+	case <-conn.die:
+		return 0, io.EOF
+	}
 }
 
 // Close closes the connection.
@@ -255,21 +271,19 @@ func (conn *TCPConn) Close() error {
 }
 
 // LocalAddr returns the local network address.
-func (conn *TCPConn) LocalAddr() net.Addr {
-	return conn.tcpconn.LocalAddr()
-}
+func (conn *TCPConn) LocalAddr() net.Addr { return conn.tcpconn.LocalAddr() }
 
 // SetDeadline implements the Conn SetDeadline method.
-func (conn *TCPConn) SetDeadline(t time.Time) error { return conn.tcpconn.SetDeadline(t) }
+func (conn *TCPConn) SetDeadline(t time.Time) error { return errOpNotImplemented }
 
 // SetReadDeadline implements the Conn SetReadDeadline method.
-func (conn *TCPConn) SetReadDeadline(t time.Time) error { return conn.tcpconn.SetReadDeadline(t) }
+func (conn *TCPConn) SetReadDeadline(t time.Time) error { return errOpNotImplemented }
 
 // SetWriteDeadline implements the Conn SetWriteDeadline method.
-func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return conn.tcpconn.SetWriteDeadline(t) }
+func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return errOpNotImplemented }
 
-// TCPFlow information
-type TCPFlow struct {
+// tcp flow information
+type tcpFlow struct {
 	seq uint32
 	ack uint32
 }
@@ -287,7 +301,7 @@ type Listener struct {
 	networkLayer gopacket.SerializableLayer // network layer header
 
 	// important TCP header information
-	flows     map[string]TCPFlow
+	flows     map[string]tcpFlow
 	flowsLock sync.Mutex
 }
 
@@ -337,7 +351,7 @@ func Listen(network, address string) (*Listener, error) {
 	// fields
 	conn := new(Listener)
 	conn.handle = handle
-	conn.flows = make(map[string]TCPFlow)
+	conn.flows = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
 	conn.listener = l
 	conn.startCapture(gopacket.NewPacketSource(handle, handle.LinkType()))
@@ -350,7 +364,7 @@ func Listen(network, address string) (*Listener, error) {
 				return
 			}
 
-			// prevent sending any packets
+			// prevent conn from sending ACKs
 			if laddr.IP.To4() == nil {
 				ipv6.NewConn(conn).SetHopLimit(0)
 			} else {
@@ -371,17 +385,25 @@ func (conn *Listener) Close() error { return conn.listener.Close() }
 func (conn *Listener) LocalAddr() net.Addr { return conn.listener.Addr() }
 
 // SetDeadline implements the Conn SetDeadline method.
-func (conn *Listener) SetDeadline(t time.Time) error { return conn.listener.SetDeadline(t) }
+func (conn *Listener) SetDeadline(t time.Time) error { return errOpNotImplemented }
 
 // SetReadDeadline implements the Conn SetReadDeadline method.
-func (conn *Listener) SetReadDeadline(t time.Time) error { return errors.New("invalid ops") }
+func (conn *Listener) SetReadDeadline(t time.Time) error { return errOpNotImplemented }
 
 // SetWriteDeadline implements the Conn SetWriteDeadline method.
-func (conn *Listener) SetWriteDeadline(t time.Time) error { return errors.New("invalid ops") }
+func (conn *Listener) SetWriteDeadline(t time.Time) error { return errOpNotImplemented }
+
+func (conn *Listener) lockflow(addr net.Addr, f func(*tcpFlow)) {
+	conn.flowsLock.Lock()
+	e := conn.flows[addr.String()]
+	f(&e)
+	conn.flows[addr.String()] = e
+	conn.flowsLock.Unlock()
+}
 
 // packet startCapture
 func (conn *Listener) startCapture(source *gopacket.PacketSource) {
-	conn.chPacket = make(chan Packet, 128)
+	conn.chPacket = make(chan Packet)
 	conn.ready = make(chan struct{})
 
 	go func() {
@@ -400,11 +422,9 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 			}
 			addr := &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}
 
-			conn.flowsLock.Lock()
-			e := conn.flows[addr.String()]
-			e.ack = transport.Ack
-			conn.flows[addr.String()] = e
-			conn.flowsLock.Unlock()
+			conn.lockflow(addr, func(e *tcpFlow) {
+				e.seq = transport.Ack // seq update
+			})
 
 			once.Do(func() {
 				// link layer
@@ -442,35 +462,24 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 						HopLimit:   0x40,
 					}
 				}
+
+				// ISN
+				conn.lockflow(addr, func(e *tcpFlow) { e.ack = transport.Seq })
+
 				close(conn.ready)
 			})
 
 			if transport.SYN {
-				conn.flowsLock.Lock()
-				e := conn.flows[addr.String()]
-				if transport.Seq > e.ack {
-					e.ack = uint32(transport.Seq) + 1
-				}
-				conn.flows[addr.String()] = e
-				conn.flowsLock.Unlock()
+				conn.lockflow(addr, func(e *tcpFlow) { e.ack++ })
 			} else if transport.PSH {
-				conn.flowsLock.Lock()
-				e := conn.flows[addr.String()]
-				if transport.Seq > e.ack {
-					e.ack = uint32(transport.Seq) + uint32(len(transport.Payload))
-				}
-				conn.flows[addr.String()] = e
-				conn.flowsLock.Unlock()
-
+				conn.lockflow(addr, func(e *tcpFlow) { e.ack += uint32(len(transport.Payload)) })
 				select {
 				case conn.chPacket <- Packet{transport.Payload, addr}:
 				case <-conn.die:
 					return
 				}
 			} else if transport.FIN {
-				conn.flowsLock.Lock()
-				delete(conn.flows, addr.String())
-				conn.flowsLock.Unlock()
+				conn.lockflow(addr, func(e *tcpFlow) { delete(conn.flows, addr.String()) })
 			}
 		}
 	}()
@@ -501,16 +510,17 @@ func (conn *Listener) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		ComputeChecksums: true,
 	}
 
-	conn.flowsLock.Lock()
-	e := conn.flows[addr.String()]
-	conn.flowsLock.Unlock()
+	var flow tcpFlow
+	conn.lockflow(addr, func(e *tcpFlow) {
+		flow = *e
+	})
 
 	tcp := &layers.TCP{
 		SrcPort: layers.TCPPort(conn.listener.Addr().(*net.TCPAddr).Port),
 		DstPort: layers.TCPPort(tcpaddr.Port),
 		Window:  12580,
-		Ack:     e.ack,
-		Seq:     e.seq,
+		Ack:     flow.ack,
+		Seq:     flow.seq,
 		PSH:     true,
 		ACK:     true,
 	}
@@ -524,10 +534,6 @@ func (conn *Listener) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, err
 	}
 
-	conn.flowsLock.Lock()
-	e = conn.flows[addr.String()]
-	e.seq += uint32(len(p))
-	conn.flows[addr.String()] = e
-	conn.flowsLock.Unlock()
+	conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
 	return len(p), nil
 }
