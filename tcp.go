@@ -23,7 +23,8 @@ var (
 	source              = rand.NewSource(time.Now().UnixNano())
 )
 
-type Packet struct {
+// message represent a incoming packet with address
+type message struct {
 	bts  []byte
 	addr net.Addr
 }
@@ -38,7 +39,7 @@ type TCPConn struct {
 	// gopacket
 	handle       *pcap.Handle
 	packetSource *gopacket.PacketSource
-	chPacket     chan Packet                // incoming packets channel
+	chMessage    chan message               // incoming packets channel
 	linkLayer    gopacket.SerializableLayer // link layer header
 	networkLayer gopacket.SerializableLayer // network layer header
 
@@ -127,7 +128,7 @@ func Dial(network, address string) (*TCPConn, error) {
 
 // startCapture capture all packets flow and track necessary information
 func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
-	conn.chPacket = make(chan Packet)
+	conn.chMessage = make(chan message)
 	conn.ready = make(chan struct{})
 
 	go func() {
@@ -201,7 +202,7 @@ func (conn *TCPConn) startCapture(source *gopacket.PacketSource) {
 				atomic.AddUint32(&conn.ack, uint32(len(transport.Payload)))
 
 				select {
-				case conn.chPacket <- Packet{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}:
+				case conn.chMessage <- message{transport.Payload, &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}}:
 				case <-conn.die:
 					return
 				}
@@ -215,7 +216,7 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	select {
 	case <-conn.die:
 		return 0, nil, io.EOF
-	case packet := <-conn.chPacket:
+	case packet := <-conn.chMessage:
 		n = copy(p, packet.bts)
 		return n, packet.addr, nil
 	}
@@ -298,7 +299,7 @@ type Listener struct {
 	// gopacket
 	handle       *pcap.Handle
 	packetSource *gopacket.PacketSource
-	chPacket     chan Packet                // incoming packets channel
+	chMessage    chan message               // incoming packets channel
 	linkLayer    gopacket.SerializableLayer // link layer header
 	networkLayer gopacket.SerializableLayer // network layer header
 
@@ -413,7 +414,7 @@ func (conn *Listener) lockflow(addr net.Addr, f func(*tcpFlow)) {
 
 // packet startCapture
 func (conn *Listener) startCapture(source *gopacket.PacketSource) {
-	conn.chPacket = make(chan Packet)
+	conn.chMessage = make(chan message)
 	conn.ready = make(chan struct{})
 
 	go func() {
@@ -484,7 +485,7 @@ func (conn *Listener) startCapture(source *gopacket.PacketSource) {
 			} else if transport.PSH {
 				conn.lockflow(addr, func(e *tcpFlow) { e.ack += uint32(len(transport.Payload)) })
 				select {
-				case conn.chPacket <- Packet{transport.Payload, addr}:
+				case conn.chMessage <- message{transport.Payload, addr}:
 				case <-conn.die:
 					return
 				}
@@ -500,7 +501,7 @@ func (conn *Listener) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	select {
 	case <-conn.die:
 		return 0, nil, io.EOF
-	case packet := <-conn.chPacket:
+	case packet := <-conn.chMessage:
 		n = copy(p, packet.bts)
 		return n, packet.addr, nil
 	}
