@@ -1,17 +1,13 @@
 # tcpraw
 
-[![GoDoc][1]][2] [![MIT licensed][3]][4] [![Build Status][5]][6] [![Go Report Card][7]][8] [![Coverage Statusd][9]][10]
+[![GoDoc][1]][2] [![MIT licensed][3]][4] [![Go Report Card][5]][6]
 
 [1]: https://godoc.org/github.com/xtaci/tcpraw?status.svg
 [2]: https://godoc.org/github.com/xtaci/tcpraw
 [3]: https://img.shields.io/badge/license-MIT-blue.svg
 [4]: LICENSE
-[5]: https://travis-ci.org/xtaci/tcpraw.svg?branch=master
-[6]: https://travis-ci.org/xtaci/tcpraw
-[7]: https://goreportcard.com/badge/github.com/xtaci/tcpraw
-[8]: https://goreportcard.com/report/github.com/xtaci/tcpraw
-[9]: https://codecov.io/gh/xtaci/tcpraw/branch/master/graph/badge.svg
-[10]: https://codecov.io/gh/xtaci/tcpraw
+[5]: https://goreportcard.com/badge/github.com/xtaci/tcpraw
+[6]: https://goreportcard.com/report/github.com/xtaci/tcpraw
 
 
 # Introduction
@@ -20,8 +16,9 @@ A packet-oriented connection by simulating tcp protocol
 
 ## Features
 
-1. Tiny
-2. cross-platform by adapting gopacket
+1. Tiny, only one file.
+2. Cross-platform .
+3. Support IPv4 and IPv6.
 
 ## Documentation
 
