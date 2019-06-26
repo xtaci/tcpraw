@@ -28,14 +28,15 @@ type message struct {
 	addr net.Addr
 }
 
-// tcp flow information
+// tcp flow information for a connection pair
 type tcpFlow struct {
-	handle       *pcap.Handle
-	ready        chan struct{}
+	handle       *pcap.Handle  // used in WriteTo to WritePacketData
+	ready        chan struct{} // mark whether the flow is ready to WriteTo
 	seq          uint32
 	ack          uint32
 	linkLayer    gopacket.SerializableLayer // link layer header
 	networkLayer gopacket.SerializableLayer // network layer header
+	ts           time.Time                  // last packet incoming
 }
 
 // TCPConn defines a TCP-packet oriented connection
@@ -52,30 +53,33 @@ type TCPConn struct {
 	chMessage    chan message // incoming packets channel
 
 	// important TCP header information
-	flows     map[string]tcpFlow
+	flowTable map[string]tcpFlow
 	flowsLock sync.Mutex
 }
 
+// deleteflow deletes the entry from the flow table
 func (conn *TCPConn) deleteflow(addr net.Addr) {
 	key := addr.String()
 	conn.flowsLock.Lock()
-	delete(conn.flows, key)
+	delete(conn.flowTable, key)
 	conn.flowsLock.Unlock()
 }
 
+// lockflow locks the flow table and apply function f on the entry
 func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	key := addr.String()
 	conn.flowsLock.Lock()
-	e, ok := conn.flows[key]
+	e, ok := conn.flowTable[key]
 	if !ok { // entry first visit
 		e.ready = make(chan struct{})
 	}
 	f(&e)
-	conn.flows[key] = e
+	conn.flowTable[key] = e
 	conn.flowsLock.Unlock()
 }
 
-func (conn *TCPConn) setttl(c net.Conn, ttl int) {
+// setTTL sets the Time-To-Live field on a given connection
+func (conn *TCPConn) setTTL(c net.Conn, ttl int) {
 	if c.LocalAddr().(*net.TCPAddr).IP.To4() == nil {
 		ipv6.NewConn(c).SetHopLimit(ttl)
 	} else {
@@ -83,7 +87,7 @@ func (conn *TCPConn) setttl(c net.Conn, ttl int) {
 	}
 }
 
-// captureFlow capture each packets flowing based on rules of BPF
+// captureFlow capture each packets inbound based on rules of BPF
 func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 	source := gopacket.NewPacketSource(handle, handle.LinkType())
 
@@ -104,15 +108,17 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 			}
 			addr := &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}
 
-			if !transport.FIN && !transport.RST {
-				conn.lockflow(addr, func(e *tcpFlow) {
-					e.seq = transport.Ack // follow sequence number
+			conn.lockflow(addr, func(e *tcpFlow) {
+				e.ts = time.Now()
+				e.seq = transport.Ack // update sequence number for every incoming packet
+				if transport.SYN {    // for SYN packets, try initialize the flow entry once
 					select {
 					case <-e.ready:
 					default:
-						e.ack = transport.Seq
+						e.ack = transport.Seq + 1
 						e.handle = handle
-						// link layer
+
+						// create link layer for WriteTo
 						if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
 							ethLayer := layer.(*layers.Ethernet)
 							e.linkLayer = &layers.Ethernet{
@@ -123,11 +129,9 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 						} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
 							loopLayer := layer.(*layers.Loopback)
 							e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
-						} else {
-							return
 						}
 
-						// network layer
+						// create network layer for WriteTo
 						if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
 							network := layer.(*layers.IPv4)
 							e.networkLayer = &layers.IPv4{
@@ -148,26 +152,28 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 								DstIP:      network.SrcIP,
 								HopLimit:   0x40,
 							}
-						} else {
-							return
 						}
-						close(e.ready)
-					}
-				})
-			}
 
-			if transport.SYN {
-				conn.lockflow(addr, func(e *tcpFlow) { e.ack++ })
-			} else if transport.PSH {
-				conn.lockflow(addr, func(e *tcpFlow) { e.ack += uint32(len(transport.Payload)) })
-				select {
-				case conn.chMessage <- message{transport.Payload, addr}:
-				case <-conn.die:
-					return
+						// this tcp flow is ready to operate based on flow information
+						if e.linkLayer != nil && e.networkLayer != nil {
+							close(e.ready)
+						}
+					}
+				} else if transport.PSH {
+					// Normal data push:
+					// increase properly the ack number for other peer,
+					// the other peer will update it's local sequence with the ack
+					e.ack += uint32(len(transport.Payload))
+					select {
+					case conn.chMessage <- message{transport.Payload, addr}:
+					case <-conn.die:
+						return
+					}
+				} else if transport.FIN || transport.RST {
+					e.ack++
+					conn.deleteflow(addr)
 				}
-			} else if transport.FIN || transport.RST {
-				conn.deleteflow(addr)
-			}
+			})
 		}
 	}()
 }
@@ -242,7 +248,7 @@ func (conn *TCPConn) Close() error {
 
 		// recover ttl before close, so it can say goodbye
 		if c, ok := conn.socket.(*net.TCPConn); ok {
-			conn.setttl(c, 64)
+			conn.setTTL(c, 64)
 		}
 		err = conn.socket.Close()
 	})
@@ -326,13 +332,13 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
 	conn.server = false
 	conn.die = make(chan struct{})
-	conn.flows = make(map[string]tcpFlow)
+	conn.flowTable = make(map[string]tcpFlow)
 	conn.handles = []*pcap.Handle{handle}
 	conn.socket = tcpconn
 	conn.localAddr = tcpconn.LocalAddr().(*net.TCPAddr)
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
-	conn.setttl(tcpconn, 0)
+	conn.setTTL(tcpconn, 0)
 
 	// discards data flow on tcp conn, to keep the window slides
 	go io.Copy(ioutil.Discard, tcpconn)
@@ -409,7 +415,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
 	conn.server = true
 	conn.handles = handles
-	conn.flows = make(map[string]tcpFlow)
+	conn.flowTable = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
 	conn.socket = l
 	conn.localAddr = l.Addr().(*net.TCPAddr)
@@ -427,7 +433,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			}
 
 			// prevent conn from sending ACKs
-			conn.setttl(tcpconn, 0)
+			conn.setTTL(tcpconn, 0)
 			go io.Copy(ioutil.Discard, tcpconn)
 		}
 	}()
