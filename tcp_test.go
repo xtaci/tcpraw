@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
-//const testPort = "127.0.0.1:3456"
+const testPortStream = "127.0.0.1:3456"
+const testPortPacket = "127.0.0.1:3457"
 
-const testPortStream = "[::1]:3456"
-const testPortPacket = "[::1]:3457"
+//const testPortStream = "[::1]:3456"
+//const testPortPacket = "[::1]:3457"
 
 func init() {
 	l, err := net.Listen("tcp", testPortStream)
