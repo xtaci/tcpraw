@@ -10,7 +10,8 @@ import (
 //const testPortPacket = "127.0.0.1:3457"
 
 const testPortStream = "[::1]:3456"
-const testPortPacket = "[::1]:3457"
+const portServerPacket = ":3457"
+const portRemotePacket = "127.0.0.1:3457"
 
 func init() {
 	l, err := net.Listen("tcp", testPortStream)
@@ -29,11 +30,10 @@ func init() {
 		}
 	}()
 
-	conn, err := Listen("tcp", testPortPacket)
+	conn, err := Listen("tcp", portServerPacket)
 	if err != nil {
 		log.Panicln(err)
 	}
-	log.Println("packet")
 
 	go func() {
 		for {
@@ -96,12 +96,12 @@ func TestDialTCPStream(t *testing.T) {
 }
 
 func TestDialToTCPPacket(t *testing.T) {
-	conn, err := Dial("tcp", testPortPacket)
+	conn, err := Dial("tcp", portRemotePacket)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", testPortPacket)
+	addr, err := net.ResolveTCPAddr("tcp", portRemotePacket)
 	if err != nil {
 		t.Fatal(err)
 	}

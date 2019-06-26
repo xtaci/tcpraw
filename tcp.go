@@ -30,6 +30,7 @@ type message struct {
 
 // tcp flow information
 type tcpFlow struct {
+	handle       *pcap.Handle
 	ready        chan struct{}
 	seq          uint32
 	ack          uint32
@@ -46,7 +47,7 @@ type TCPConn struct {
 	localAddr *net.TCPAddr
 
 	// gopacket
-	handle       *pcap.Handle
+	handles      []*pcap.Handle
 	packetSource *gopacket.PacketSource
 	chMessage    chan message // incoming packets channel
 
@@ -75,8 +76,8 @@ func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 }
 
 // captureFlow capture each packets flowing based on rules of BPF
-func (conn *TCPConn) captureFlow(source *gopacket.PacketSource) {
-	conn.chMessage = make(chan message)
+func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
+	source := gopacket.NewPacketSource(handle, handle.LinkType())
 
 	go func() {
 		for packet := range source.Packets() {
@@ -102,6 +103,7 @@ func (conn *TCPConn) captureFlow(source *gopacket.PacketSource) {
 				case <-e.ready:
 				default:
 					e.ack = transport.Seq
+					e.handle = handle
 					// link layer
 					if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
 						ethLayer := layer.(*layers.Ethernet)
@@ -211,7 +213,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		payload := gopacket.Payload(p)
 
 		gopacket.SerializeLayers(buf, opts, flow.linkLayer, flow.networkLayer, tcp, payload)
-		if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
+		if err := flow.handle.WritePacketData(buf.Bytes()); err != nil {
 			return 0, err
 		}
 
@@ -225,7 +227,9 @@ func (conn *TCPConn) Close() error {
 	var err error
 	conn.dieOnce.Do(func() {
 		close(conn.die)
-		conn.handle.Close()
+		for k := range conn.handles {
+			conn.handles[k].Close()
+		}
 		err = conn.socket.Close()
 	})
 	return err
@@ -314,10 +318,11 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.server = false
 	conn.die = make(chan struct{})
 	conn.flows = make(map[string]tcpFlow)
-	conn.handle = handle
+	conn.handles = []*pcap.Handle{handle}
 	conn.socket = tcpconn
 	conn.localAddr = tcpconn.LocalAddr().(*net.TCPAddr)
-	conn.captureFlow(gopacket.NewPacketSource(handle, handle.LinkType()))
+	conn.chMessage = make(chan message)
+	conn.captureFlow(handle)
 
 	// discards data flow on tcp conn, to keep the window slides
 	go io.Copy(ioutil.Discard, tcpconn)
@@ -339,22 +344,49 @@ func Listen(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	var ifaceName string
-	for _, iface := range ifaces {
-		for _, addr := range iface.Addresses {
-			if addr.IP.Equal(laddr.IP) {
-				ifaceName = iface.Name
+	var handles []*pcap.Handle
+	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all iface
+		for _, iface := range ifaces {
+			if len(iface.Addresses) > 0 {
+				// try open on all nics
+				if handle, err := pcap.OpenLive(iface.Name, 65536, true, time.Second); err == nil {
+					// apply filter
+					filter := fmt.Sprintf("tcp and dst port %v", laddr.Port)
+					if err := handle.SetBPFFilter(filter); err != nil {
+						return nil, err
+					}
+
+					handles = append(handles, handle)
+				}
 			}
 		}
-	}
-	if ifaceName == "" {
-		return nil, errors.New("cannot find correct interface")
-	}
+		if len(handles) == 0 {
+			return nil, errors.New("cannot find any interface")
+		}
+	} else {
+		var ifaceName string
+		for _, iface := range ifaces {
+			for _, addr := range iface.Addresses {
+				if addr.IP.Equal(laddr.IP) {
+					ifaceName = iface.Name
+				}
+			}
+		}
+		if ifaceName == "" {
+			return nil, errors.New("cannot find correct interface")
+		}
+		// pcap init
+		handle, err := pcap.OpenLive(ifaceName, 65536, true, time.Second)
+		if err != nil {
+			return nil, err
+		}
 
-	// pcap init
-	handle, err := pcap.OpenLive(ifaceName, 65536, true, time.Second)
-	if err != nil {
-		return nil, err
+		// apply filter
+		filter := fmt.Sprintf("tcp and dst host %v and dst port %v", laddr.IP, laddr.Port)
+		if err := handle.SetBPFFilter(filter); err != nil {
+			return nil, err
+		}
+		handles = []*pcap.Handle{handle}
 	}
 
 	// start listening
@@ -363,21 +395,18 @@ func Listen(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// apply filter for incoming data
-	filter := fmt.Sprintf("tcp and dst host %v and dst port %v", laddr.IP, laddr.Port)
-	if err := handle.SetBPFFilter(filter); err != nil {
-		return nil, err
-	}
-
 	// fields
 	conn := new(TCPConn)
 	conn.server = true
-	conn.handle = handle
+	conn.handles = handles
 	conn.flows = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
 	conn.socket = l
 	conn.localAddr = l.Addr().(*net.TCPAddr)
-	conn.captureFlow(gopacket.NewPacketSource(handle, handle.LinkType()))
+	conn.chMessage = make(chan message)
+	for k := range handles {
+		conn.captureFlow(handles[k])
+	}
 
 	// discard everything in original connection
 	go func() {
