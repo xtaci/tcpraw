@@ -292,7 +292,9 @@ type tcpFlow struct {
 type Listener struct {
 	ready    chan struct{}
 	die      chan struct{}
+	dieOnce  sync.Once
 	listener *net.TCPListener
+
 	// gopacket
 	handle       *pcap.Handle
 	packetSource *gopacket.PacketSource
@@ -379,7 +381,15 @@ func Listen(network, address string) (*Listener, error) {
 }
 
 // Close closes the connection.
-func (conn *Listener) Close() error { return conn.listener.Close() }
+func (conn *Listener) Close() error {
+	var err error
+	conn.dieOnce.Do(func() {
+		close(conn.die)
+		conn.handle.Close()
+		err = conn.listener.Close()
+	})
+	return err
+}
 
 // LocalAddr returns the local network address.
 func (conn *Listener) LocalAddr() net.Addr { return conn.listener.Addr() }
