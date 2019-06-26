@@ -173,10 +173,9 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		ComputeChecksums: true,
 	}
 
+	// fetch ack & seq
 	var flow tcpFlow
-	conn.lockflow(addr, func(e *tcpFlow) {
-		flow = *e
-	})
+	conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
 
 	tcp := &layers.TCP{
 		SrcPort: layers.TCPPort(conn.localAddr.Port),
