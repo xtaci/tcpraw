@@ -23,7 +23,8 @@ func init() {
 		for {
 			conn, err := l.Accept()
 			if err != nil {
-				log.Panicln(err)
+				log.Println(err)
+				return
 			}
 
 			go handleRequest(conn)
@@ -40,14 +41,14 @@ func init() {
 			buf := make([]byte, 128)
 			n, addr, err := conn.ReadFrom(buf)
 			if err != nil {
-				log.Println(err)
+				log.Println("readfrom:", err)
 				return
 			}
 
 			//echo
 			n, err = conn.WriteTo(buf[:n], addr)
 			if err != nil {
-				log.Println(err)
+				log.Println("writeTo:", err)
 				return
 			}
 		}
@@ -55,15 +56,13 @@ func init() {
 }
 
 func handleRequest(conn net.Conn) {
-	log.Println("Accepted new connection.")
 	defer conn.Close()
-	defer log.Println("Closed connection.")
 
 	for {
 		buf := make([]byte, 1024)
 		size, err := conn.Read(buf)
 		if err != nil {
-			log.Println(err)
+			log.Println("handleRequest:", err)
 			return
 		}
 		data := buf[:size]
@@ -93,6 +92,7 @@ func TestDialTCPStream(t *testing.T) {
 	} else {
 		t.Log(string(buf[:n]), "from:", addr)
 	}
+	conn.Close()
 }
 
 func TestDialToTCPPacket(t *testing.T) {
@@ -117,4 +117,5 @@ func TestDialToTCPPacket(t *testing.T) {
 	} else {
 		t.Log(string(buf[:n]), "from:", addr)
 	}
+	conn.Close()
 }

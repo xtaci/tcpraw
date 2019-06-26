@@ -75,6 +75,14 @@ func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	conn.flowsLock.Unlock()
 }
 
+func (conn *TCPConn) setttl(c net.Conn, ttl int) {
+	if c.LocalAddr().(*net.TCPAddr).IP.To4() == nil {
+		ipv6.NewConn(c).SetHopLimit(ttl)
+	} else {
+		ipv4.NewConn(c).SetTTL(ttl)
+	}
+}
+
 // captureFlow capture each packets flowing based on rules of BPF
 func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 	source := gopacket.NewPacketSource(handle, handle.LinkType())
@@ -96,56 +104,57 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 			}
 			addr := &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}
 
-			// follow sequence number
-			conn.lockflow(addr, func(e *tcpFlow) {
-				e.seq = transport.Ack
-				select {
-				case <-e.ready:
-				default:
-					e.ack = transport.Seq
-					e.handle = handle
-					// link layer
-					if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
-						ethLayer := layer.(*layers.Ethernet)
-						e.linkLayer = &layers.Ethernet{
-							EthernetType: ethLayer.EthernetType,
-							SrcMAC:       ethLayer.DstMAC,
-							DstMAC:       ethLayer.SrcMAC,
+			if !transport.FIN && !transport.RST {
+				conn.lockflow(addr, func(e *tcpFlow) {
+					e.seq = transport.Ack // follow sequence number
+					select {
+					case <-e.ready:
+					default:
+						e.ack = transport.Seq
+						e.handle = handle
+						// link layer
+						if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
+							ethLayer := layer.(*layers.Ethernet)
+							e.linkLayer = &layers.Ethernet{
+								EthernetType: ethLayer.EthernetType,
+								SrcMAC:       ethLayer.DstMAC,
+								DstMAC:       ethLayer.SrcMAC,
+							}
+						} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
+							loopLayer := layer.(*layers.Loopback)
+							e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
+						} else {
+							return
 						}
-					} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
-						loopLayer := layer.(*layers.Loopback)
-						e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
-					} else {
-						return
-					}
 
-					// network layer
-					if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-						network := layer.(*layers.IPv4)
-						e.networkLayer = &layers.IPv4{
-							SrcIP:    network.DstIP,
-							DstIP:    network.SrcIP,
-							Protocol: network.Protocol,
-							Version:  network.Version,
-							Id:       network.Id,
-							Flags:    layers.IPv4DontFragment,
-							TTL:      0x40,
+						// network layer
+						if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
+							network := layer.(*layers.IPv4)
+							e.networkLayer = &layers.IPv4{
+								SrcIP:    network.DstIP,
+								DstIP:    network.SrcIP,
+								Protocol: network.Protocol,
+								Version:  network.Version,
+								Id:       network.Id,
+								Flags:    layers.IPv4DontFragment,
+								TTL:      0x40,
+							}
+						} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
+							network := layer.(*layers.IPv6)
+							e.networkLayer = &layers.IPv6{
+								Version:    network.Version,
+								NextHeader: network.NextHeader,
+								SrcIP:      network.DstIP,
+								DstIP:      network.SrcIP,
+								HopLimit:   0x40,
+							}
+						} else {
+							return
 						}
-					} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
-						network := layer.(*layers.IPv6)
-						e.networkLayer = &layers.IPv6{
-							Version:    network.Version,
-							NextHeader: network.NextHeader,
-							SrcIP:      network.DstIP,
-							DstIP:      network.SrcIP,
-							HopLimit:   0x40,
-						}
-					} else {
-						return
+						close(e.ready)
 					}
-					close(e.ready)
-				}
-			})
+				})
+			}
 
 			if transport.SYN {
 				conn.lockflow(addr, func(e *tcpFlow) { e.ack++ })
@@ -230,6 +239,11 @@ func (conn *TCPConn) Close() error {
 		for k := range conn.handles {
 			conn.handles[k].Close()
 		}
+
+		// recover ttl before close, so it can say goodbye
+		if c, ok := conn.socket.(*net.TCPConn); ok {
+			conn.setttl(c, 64)
+		}
 		err = conn.socket.Close()
 	})
 	return err
@@ -307,11 +321,6 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// prevent tcpconn from sending ACKs
-	if laddr.IP.To4() == nil {
-		ipv6.NewConn(tcpconn).SetHopLimit(0)
-	} else {
-		ipv4.NewConn(tcpconn).SetTTL(0)
-	}
 
 	// fields
 	conn := new(TCPConn)
@@ -323,6 +332,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.localAddr = tcpconn.LocalAddr().(*net.TCPAddr)
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
+	conn.setttl(tcpconn, 0)
 
 	// discards data flow on tcp conn, to keep the window slides
 	go io.Copy(ioutil.Discard, tcpconn)
@@ -411,19 +421,14 @@ func Listen(network, address string) (*TCPConn, error) {
 	// discard everything in original connection
 	go func() {
 		for {
-			conn, err := l.Accept()
+			tcpconn, err := l.Accept()
 			if err != nil {
 				return
 			}
 
 			// prevent conn from sending ACKs
-			if laddr.IP.To4() == nil {
-				ipv6.NewConn(conn).SetHopLimit(0)
-			} else {
-				ipv4.NewConn(conn).SetTTL(0)
-			}
-
-			go io.Copy(ioutil.Discard, conn)
+			conn.setttl(tcpconn, 0)
+			go io.Copy(ioutil.Discard, tcpconn)
 		}
 	}()
 
