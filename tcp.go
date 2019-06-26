@@ -30,14 +30,16 @@ type message struct {
 
 // tcp flow information
 type tcpFlow struct {
-	seq uint32
-	ack uint32
+	ready        chan struct{}
+	seq          uint32
+	ack          uint32
+	linkLayer    gopacket.SerializableLayer // link layer header
+	networkLayer gopacket.SerializableLayer // network layer header
 }
 
 // TCPConn defines a TCP-packet oriented connection
 type TCPConn struct {
 	server    bool // mark this connetion as tcp listener
-	ready     chan struct{}
 	die       chan struct{}
 	dieOnce   sync.Once
 	socket    io.Closer
@@ -46,30 +48,37 @@ type TCPConn struct {
 	// gopacket
 	handle       *pcap.Handle
 	packetSource *gopacket.PacketSource
-	chMessage    chan message               // incoming packets channel
-	linkLayer    gopacket.SerializableLayer // link layer header
-	networkLayer gopacket.SerializableLayer // network layer header
+	chMessage    chan message // incoming packets channel
 
 	// important TCP header information
 	flows     map[string]tcpFlow
 	flowsLock sync.Mutex
 }
 
-func (conn *TCPConn) lockflow(addr net.Addr, f func(*tcpFlow)) {
+func (conn *TCPConn) deleteflow(addr net.Addr) {
+	key := addr.String()
 	conn.flowsLock.Lock()
-	e := conn.flows[addr.String()]
+	delete(conn.flows, key)
+	conn.flowsLock.Unlock()
+}
+
+func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
+	key := addr.String()
+	conn.flowsLock.Lock()
+	e, ok := conn.flows[key]
+	if !ok { // entry first visit
+		e.ready = make(chan struct{})
+	}
 	f(&e)
-	conn.flows[addr.String()] = e
+	conn.flows[key] = e
 	conn.flowsLock.Unlock()
 }
 
 // captureFlow capture each packets flowing based on rules of BPF
 func (conn *TCPConn) captureFlow(source *gopacket.PacketSource) {
 	conn.chMessage = make(chan message)
-	conn.ready = make(chan struct{})
 
 	go func() {
-		var once sync.Once
 		for packet := range source.Packets() {
 			transport := packet.TransportLayer().(*layers.TCP)
 
@@ -87,49 +96,53 @@ func (conn *TCPConn) captureFlow(source *gopacket.PacketSource) {
 			addr := &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}
 
 			// follow sequence number
-			conn.lockflow(addr, func(e *tcpFlow) { e.seq = transport.Ack })
-
-			once.Do(func() {
-				// link layer
-				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
-					ethLayer := layer.(*layers.Ethernet)
-					conn.linkLayer = &layers.Ethernet{
-						EthernetType: ethLayer.EthernetType,
-						SrcMAC:       ethLayer.DstMAC,
-						DstMAC:       ethLayer.SrcMAC,
+			conn.lockflow(addr, func(e *tcpFlow) {
+				e.seq = transport.Ack
+				select {
+				case <-e.ready:
+				default:
+					e.ack = transport.Seq
+					// link layer
+					if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
+						ethLayer := layer.(*layers.Ethernet)
+						e.linkLayer = &layers.Ethernet{
+							EthernetType: ethLayer.EthernetType,
+							SrcMAC:       ethLayer.DstMAC,
+							DstMAC:       ethLayer.SrcMAC,
+						}
+					} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
+						loopLayer := layer.(*layers.Loopback)
+						e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
+					} else {
+						return
 					}
-				} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
-					loopLayer := layer.(*layers.Loopback)
-					conn.linkLayer = &layers.Loopback{Family: loopLayer.Family}
+
+					// network layer
+					if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
+						network := layer.(*layers.IPv4)
+						e.networkLayer = &layers.IPv4{
+							SrcIP:    network.DstIP,
+							DstIP:    network.SrcIP,
+							Protocol: network.Protocol,
+							Version:  network.Version,
+							Id:       network.Id,
+							Flags:    layers.IPv4DontFragment,
+							TTL:      0x40,
+						}
+					} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
+						network := layer.(*layers.IPv6)
+						e.networkLayer = &layers.IPv6{
+							Version:    network.Version,
+							NextHeader: network.NextHeader,
+							SrcIP:      network.DstIP,
+							DstIP:      network.SrcIP,
+							HopLimit:   0x40,
+						}
+					} else {
+						return
+					}
+					close(e.ready)
 				}
-
-				// network layer
-				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-					network := layer.(*layers.IPv4)
-					conn.networkLayer = &layers.IPv4{
-						SrcIP:    network.DstIP,
-						DstIP:    network.SrcIP,
-						Protocol: network.Protocol,
-						Version:  network.Version,
-						Id:       network.Id,
-						Flags:    layers.IPv4DontFragment,
-						TTL:      0x40,
-					}
-				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
-					network := layer.(*layers.IPv6)
-					conn.networkLayer = &layers.IPv6{
-						Version:    network.Version,
-						NextHeader: network.NextHeader,
-						SrcIP:      network.DstIP,
-						DstIP:      network.SrcIP,
-						HopLimit:   0x40,
-					}
-				}
-
-				// ISN
-				conn.lockflow(addr, func(e *tcpFlow) { e.ack = transport.Seq })
-
-				close(conn.ready)
 			})
 
 			if transport.SYN {
@@ -141,8 +154,8 @@ func (conn *TCPConn) captureFlow(source *gopacket.PacketSource) {
 				case <-conn.die:
 					return
 				}
-			} else if transport.FIN {
-				conn.lockflow(addr, func(e *tcpFlow) { delete(conn.flows, addr.String()) })
+			} else if transport.FIN || transport.RST {
+				conn.deleteflow(addr)
 			}
 		}
 	}()
@@ -161,43 +174,50 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 
 // WriteTo implements the PacketConn WriteTo method.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	<-conn.ready
-	tcpaddr, err := net.ResolveTCPAddr("tcp", addr.String())
-	if err != nil {
-		return 0, err
+	var ready chan struct{}
+	conn.lockflow(addr, func(e *tcpFlow) { ready = e.ready })
+
+	select {
+	case <-conn.die:
+		return 0, io.EOF
+	case <-ready:
+		tcpaddr, err := net.ResolveTCPAddr("tcp", addr.String())
+		if err != nil {
+			return 0, err
+		}
+
+		buf := gopacket.NewSerializeBuffer()
+		opts := gopacket.SerializeOptions{
+			FixLengths:       true,
+			ComputeChecksums: true,
+		}
+
+		// fetch flow
+		var flow tcpFlow
+		conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
+
+		tcp := &layers.TCP{
+			SrcPort: layers.TCPPort(conn.localAddr.Port),
+			DstPort: layers.TCPPort(tcpaddr.Port),
+			Window:  12580,
+			Ack:     flow.ack,
+			Seq:     flow.seq,
+			PSH:     true,
+			ACK:     true,
+		}
+
+		tcp.SetNetworkLayerForChecksum(flow.networkLayer.(gopacket.NetworkLayer))
+
+		payload := gopacket.Payload(p)
+
+		gopacket.SerializeLayers(buf, opts, flow.linkLayer, flow.networkLayer, tcp, payload)
+		if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
+			return 0, err
+		}
+
+		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
+		return len(p), nil
 	}
-
-	buf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-
-	// fetch ack & seq
-	var flow tcpFlow
-	conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
-
-	tcp := &layers.TCP{
-		SrcPort: layers.TCPPort(conn.localAddr.Port),
-		DstPort: layers.TCPPort(tcpaddr.Port),
-		Window:  12580,
-		Ack:     flow.ack,
-		Seq:     flow.seq,
-		PSH:     true,
-		ACK:     true,
-	}
-
-	tcp.SetNetworkLayerForChecksum(conn.networkLayer.(gopacket.NetworkLayer))
-
-	payload := gopacket.Payload(p)
-
-	gopacket.SerializeLayers(buf, opts, conn.linkLayer, conn.networkLayer, tcp, payload)
-	if err := conn.handle.WritePacketData(buf.Bytes()); err != nil {
-		return 0, err
-	}
-
-	conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
-	return len(p), nil
 }
 
 // Close closes the connection.
