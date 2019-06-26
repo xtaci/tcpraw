@@ -5,6 +5,7 @@ go:
     - 1.11.x
 
 before_install:
+    - sudo apt update
     - sudo apt install libpcap-dev
     - go get -t -v ./...
 
