@@ -8,13 +8,12 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 )
 
 var (
@@ -41,11 +40,15 @@ type tcpFlow struct {
 
 // TCPConn defines a TCP-packet oriented connection
 type TCPConn struct {
-	server    bool // mark this connetion as tcp listener
-	die       chan struct{}
-	dieOnce   sync.Once
-	socket    io.Closer
-	localAddr *net.TCPAddr
+	die     chan struct{}
+	dieOnce sync.Once
+
+	// the original connection
+	tcpconn  *net.TCPConn
+	listener *net.TCPListener
+	// connections accepted from listener
+	sysConns     map[string]net.Conn
+	sysConnsLock sync.Mutex
 
 	// gopacket
 	handles      []*pcap.Handle
@@ -79,12 +82,34 @@ func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 }
 
 // setTTL sets the Time-To-Live field on a given connection
-func (conn *TCPConn) setTTL(c net.Conn, ttl int) {
-	if c.LocalAddr().(*net.TCPAddr).IP.To4() == nil {
-		ipv6.NewConn(c).SetHopLimit(ttl)
-	} else {
-		ipv4.NewConn(c).SetTTL(ttl)
+func (conn *TCPConn) setTTL(x interface{}, ttl int) (err error) {
+	var raw syscall.RawConn
+	var addr *net.TCPAddr
+
+	if l, ok := x.(*net.TCPListener); ok {
+		raw, err = l.SyscallConn()
+		if err != nil {
+			return err
+		}
+		addr = l.Addr().(*net.TCPAddr)
+	} else if c, ok := x.(*net.TCPConn); ok {
+		raw, err = c.SyscallConn()
+		if err != nil {
+			return err
+		}
+		addr = c.LocalAddr().(*net.TCPAddr)
 	}
+
+	if addr.IP.To4() == nil {
+		raw.Control(func(fd uintptr) {
+			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
+		})
+	} else {
+		raw.Control(func(fd uintptr) {
+			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
+		})
+	}
+	return
 }
 
 // captureFlow capture each packets inbound based on rules of BPF
@@ -141,7 +166,7 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 								Version:  network.Version,
 								Id:       network.Id,
 								Flags:    layers.IPv4DontFragment,
-								TTL:      0x40,
+								TTL:      64,
 							}
 						} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
 							network := layer.(*layers.IPv6)
@@ -150,7 +175,7 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 								NextHeader: network.NextHeader,
 								SrcIP:      network.DstIP,
 								DstIP:      network.SrcIP,
-								HopLimit:   0x40,
+								HopLimit:   64,
 							}
 						}
 
@@ -172,6 +197,7 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 				} else if transport.FIN || transport.RST {
 					e.ack++
 					conn.deleteflow(addr)
+					conn.closePeer(addr)
 				}
 			})
 		}
@@ -213,8 +239,14 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		var flow tcpFlow
 		conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
 
+		var localAddr *net.TCPAddr
+		if conn.tcpconn != nil {
+			localAddr = conn.tcpconn.LocalAddr().(*net.TCPAddr)
+		} else {
+			localAddr = conn.listener.Addr().(*net.TCPAddr)
+		}
 		tcp := &layers.TCP{
-			SrcPort: layers.TCPPort(conn.localAddr.Port),
+			SrcPort: layers.TCPPort(localAddr.Port),
 			DstPort: layers.TCPPort(tcpaddr.Port),
 			Window:  12580,
 			Ack:     flow.ack,
@@ -242,21 +274,55 @@ func (conn *TCPConn) Close() error {
 	var err error
 	conn.dieOnce.Do(func() {
 		close(conn.die)
+		// stop capturing
 		for k := range conn.handles {
 			conn.handles[k].Close()
 		}
 
-		// recover ttl before close, so it can say goodbye
-		if c, ok := conn.socket.(*net.TCPConn); ok {
-			conn.setTTL(c, 64)
+		// close all socket connections
+		if conn.tcpconn != nil {
+			conn.setTTL(conn.tcpconn, 64) // recover ttl before close, so it can say goodbye
+			err = conn.tcpconn.Close()
+		} else if conn.listener != nil {
+			err = conn.listener.Close() // close listener
+			conn.sysConnsLock.Lock()
+			for k := range conn.sysConns { // close all accepted conns
+				conn.setTTL(conn.sysConns[k], 64)
+				conn.sysConns[k].Close()
+			}
+			conn.sysConns = nil
+			conn.sysConnsLock.Unlock()
 		}
-		err = conn.socket.Close()
 	})
 	return err
 }
 
+// when a FIN or RST has arrived, trigger conn.Close on the original connection
+// called from captureFlow
+func (conn *TCPConn) closePeer(addr net.Addr) {
+	if conn.tcpconn != nil {
+		conn.setTTL(conn.tcpconn, 64)
+		conn.tcpconn.Close()
+	} else if conn.listener != nil {
+		conn.sysConnsLock.Lock()
+		if c, ok := conn.sysConns[addr.String()]; ok {
+			conn.setTTL(c, 64)
+			c.Close()
+			delete(conn.sysConns, addr.String())
+		}
+		conn.sysConnsLock.Unlock()
+	}
+}
+
 // LocalAddr returns the local network address.
-func (conn *TCPConn) LocalAddr() net.Addr { return conn.localAddr }
+func (conn *TCPConn) LocalAddr() net.Addr {
+	if conn.tcpconn != nil {
+		return conn.tcpconn.LocalAddr()
+	} else if conn.listener != nil {
+		return conn.listener.Addr()
+	}
+	return nil
+}
 
 // SetDeadline implements the Conn SetDeadline method.
 func (conn *TCPConn) SetDeadline(t time.Time) error { return errOpNotImplemented }
@@ -328,18 +394,19 @@ func Dial(network, address string) (*TCPConn, error) {
 
 	// fields
 	conn := new(TCPConn)
-	conn.server = false
 	conn.die = make(chan struct{})
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.handles = []*pcap.Handle{handle}
-	conn.socket = tcpconn
-	conn.localAddr = tcpconn.LocalAddr().(*net.TCPAddr)
+	conn.tcpconn = tcpconn
+	conn.setTTL(tcpconn, 0) // prevent tcpconn from sending ACKs
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
-	conn.setTTL(tcpconn, 0) // prevent tcpconn from sending ACKs
 
-	// discards data flow on tcp conn, to keep the window slides
-	go io.Copy(ioutil.Discard, tcpconn)
+	// discards data flow on tcp conn
+	go func() {
+		io.Copy(ioutil.Discard, tcpconn)
+		tcpconn.Close()
+	}()
 
 	return conn, nil
 }
@@ -410,13 +477,14 @@ func Listen(network, address string) (*TCPConn, error) {
 
 	// fields
 	conn := new(TCPConn)
-	conn.server = true
+	conn.sysConns = make(map[string]net.Conn)
 	conn.handles = handles
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
-	conn.socket = l
-	conn.localAddr = l.Addr().(*net.TCPAddr)
+	conn.listener = l
+	conn.setTTL(l, 0) // prevent tcpconn from sending ACKs
 	conn.chMessage = make(chan message)
+
 	for k := range handles {
 		conn.captureFlow(handles[k])
 	}
@@ -429,8 +497,11 @@ func Listen(network, address string) (*TCPConn, error) {
 				return
 			}
 
-			conn.setTTL(tcpconn, 0) // prevent conn from sending ACKs
-			go io.Copy(ioutil.Discard, tcpconn)
+			// record original connections for proper closing
+			conn.sysConnsLock.Lock()
+			conn.sysConns[tcpconn.LocalAddr().String()] = tcpconn
+			conn.sysConnsLock.Unlock()
+			go func() { io.Copy(ioutil.Discard, tcpconn) }()
 		}
 	}()
 

@@ -13,7 +13,7 @@ const testPortStream = "[::1]:3456"
 const portServerPacket = ":3457"
 const portRemotePacket = "127.0.0.1:3457"
 
-func init() {
+func startTCPServer() net.Listener {
 	l, err := net.Listen("tcp", testPortStream)
 	if err != nil {
 		log.Panicln(err)
@@ -30,7 +30,10 @@ func init() {
 			go handleRequest(conn)
 		}
 	}()
+	return l
+}
 
+func startTCPRawServer() *TCPConn {
 	conn, err := Listen("tcp", portServerPacket)
 	if err != nil {
 		log.Panicln(err)
@@ -41,18 +44,19 @@ func init() {
 			buf := make([]byte, 128)
 			n, addr, err := conn.ReadFrom(buf)
 			if err != nil {
-				log.Println("readfrom:", err)
+				log.Println("server readfrom:", err)
 				return
 			}
 
 			//echo
 			n, err = conn.WriteTo(buf[:n], addr)
 			if err != nil {
-				log.Println("writeTo:", err)
+				log.Println("server writeTo:", err)
 				return
 			}
 		}
 	}()
+	return conn
 }
 
 func handleRequest(conn net.Conn) {
@@ -71,6 +75,7 @@ func handleRequest(conn net.Conn) {
 }
 
 func TestDialTCPStream(t *testing.T) {
+	l := startTCPServer()
 	conn, err := Dial("tcp", testPortStream)
 	if err != nil {
 		t.Fatal(err)
@@ -93,9 +98,11 @@ func TestDialTCPStream(t *testing.T) {
 		t.Log(string(buf[:n]), "from:", addr)
 	}
 	conn.Close()
+	l.Close()
 }
 
 func TestDialToTCPPacket(t *testing.T) {
+	s := startTCPRawServer()
 	conn, err := Dial("tcp", portRemotePacket)
 	if err != nil {
 		t.Fatal(err)
@@ -117,5 +124,7 @@ func TestDialToTCPPacket(t *testing.T) {
 	} else {
 		t.Log(string(buf[:n]), "from:", addr)
 	}
-	conn.Close()
+	s.Close()
+	//	<-time.After(time.Minute)
+	//conn.Close()
 }
