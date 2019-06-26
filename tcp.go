@@ -223,7 +223,8 @@ func (conn *TCPConn) SetReadDeadline(t time.Time) error { return errOpNotImpleme
 // SetWriteDeadline implements the Conn SetWriteDeadline method.
 func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return errOpNotImplemented }
 
-// Dial connects to the remote TCP port
+// Dial connects to the remote TCP port,
+// and returns a single packet-oriented connection
 func Dial(network, address string) (*TCPConn, error) {
 	// remote address resolve
 	raddr, err := net.ResolveTCPAddr(network, address)
@@ -304,7 +305,8 @@ func Dial(network, address string) (*TCPConn, error) {
 	return conn, nil
 }
 
-// TCPListener returns a TCP-packet oriented listener
+// Listen acts like net.ListenTCP,
+// and returns a single packet-oriented connection
 func Listen(network, address string) (*TCPConn, error) {
 	laddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
