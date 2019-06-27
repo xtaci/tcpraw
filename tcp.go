@@ -144,12 +144,12 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 
 			conn.lockflow(addr, func(e *tcpFlow) {
 				e.ts = time.Now()
-				e.seq = transport.Ack // update sequence number for every incoming packet
-				if transport.SYN {    // for SYN packets, try initialize the flow entry once
+				e.ack = transport.Seq
+				e.seq = transport.Ack
+				if transport.SYN { // for SYN packets, try initialize the flow entry once
 					select {
 					case <-e.ready:
 					default:
-						e.ack = transport.Seq + 1
 						e.handle = handle
 
 						// create link layer for WriteTo
@@ -195,9 +195,6 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 					}
 				} else if transport.PSH {
 					// Normal data push:
-					// increase properly the ack number for other peer,
-					// the other peer will update it's local sequence with the ack
-					e.ack += uint32(len(transport.Payload))
 					select {
 					case conn.chMessage <- message{transport.Payload, addr}:
 					case <-conn.die:
@@ -276,7 +273,6 @@ func (conn *TCPConn) writeToWithFlags(p []byte, addr net.Addr, SYN bool, PSH boo
 			return 0, err
 		}
 
-		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
 		return len(p), nil
 	}
 }
@@ -404,7 +400,6 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.handles = []*pcap.Handle{handle}
 	conn.tcpconn = tcpconn
-	conn.setTTL(tcpconn, 1) // prevent tcpconn from sending ACKs
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
 
@@ -531,7 +526,6 @@ func Listen(network, address string) (*TCPConn, error) {
 			if err != nil {
 				return
 			}
-			conn.setTTL(tcpconn, 1)
 
 			// record original connections for proper closing
 			conn.osConnsLock.Lock()
