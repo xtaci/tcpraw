@@ -47,9 +47,11 @@ func startTCPRawServer() *TCPConn {
 				log.Println("server readfrom:", err)
 				return
 			}
+			log.Println("echo-received")
 
 			//echo
 			n, err = conn.WriteTo(buf[:n], addr)
+			log.Println("echo-reply")
 			if err != nil {
 				log.Println("server writeTo:", err)
 				return
@@ -126,4 +128,32 @@ func TestDialToTCPPacket(t *testing.T) {
 	}
 	conn.Close()
 	s.Close()
+}
+
+func BenchmarkEcho(b *testing.B) {
+	s := startTCPRawServer()
+	defer s.Close()
+	conn, err := Dial("tcp", portRemotePacket)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer conn.Close()
+
+	addr, err := net.ResolveTCPAddr("tcp", portRemotePacket)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	buf := make([]byte, 1500)
+	for i := 0; i < b.N; i++ {
+		log.Println(i)
+		n, err := conn.WriteTo([]byte("abc"), addr)
+		if err != nil {
+			b.Fatal(n, err)
+		}
+
+		if n, addr, err := conn.ReadFrom(buf); err != nil {
+			b.Fatal(n, addr, err)
+		}
+	}
 }

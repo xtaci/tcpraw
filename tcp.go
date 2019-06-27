@@ -204,9 +204,6 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 					case <-conn.die:
 						return
 					}
-				} else if transport.FIN || transport.RST {
-					e.ack++
-					conn.closePeer(addr)
 				}
 			})
 		}
@@ -315,21 +312,6 @@ func (conn *TCPConn) Close() error {
 	return err
 }
 
-// when a FIN or RST has arrived, trigger conn.Close on the original connection
-// called from captureFlow
-func (conn *TCPConn) closePeer(addr net.Addr) {
-	if conn.tcpconn != nil {
-		conn.tcpconn.Close()
-	} else if conn.listener != nil {
-		conn.osConnsLock.Lock()
-		if c, ok := conn.osConns[addr.String()]; ok {
-			c.Close()
-			delete(conn.osConns, addr.String())
-		}
-		conn.osConnsLock.Unlock()
-	}
-}
-
 // LocalAddr returns the local network address.
 func (conn *TCPConn) LocalAddr() net.Addr {
 	if conn.tcpconn != nil {
@@ -383,7 +365,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// pcap init
-	handle, err := pcap.OpenLive(ifaceName, 65536, false, time.Second)
+	handle, err := pcap.OpenLive(ifaceName, 65536, false, pcap.BlockForever)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +439,7 @@ func Listen(network, address string) (*TCPConn, error) {
 				}
 
 				// try open on all nics
-				if handle, err := pcap.OpenLive(iface.Name, 65536, false, time.Second); err == nil {
+				if handle, err := pcap.OpenLive(iface.Name, 65536, false, pcap.BlockForever); err == nil {
 					// apply filter
 					filter := fmt.Sprintf("tcp and %v and dst port %v", dsthost, laddr.Port)
 					if err := handle.SetBPFFilter(filter); err != nil {
