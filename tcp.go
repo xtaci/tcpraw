@@ -48,8 +48,8 @@ type TCPConn struct {
 	tcpconn  *net.TCPConn
 	listener *net.TCPListener
 	// connections accepted from listener
-	sysConns     map[string]net.Conn
-	sysConnsLock sync.Mutex
+	osConns     map[string]net.Conn
+	osConnsLock sync.Mutex
 
 	// gopacket
 	handles      []*pcap.Handle
@@ -304,13 +304,13 @@ func (conn *TCPConn) Close() error {
 			err = conn.tcpconn.Close()
 		} else if conn.listener != nil {
 			err = conn.listener.Close() // close listener
-			conn.sysConnsLock.Lock()
-			for _, tcpconn := range conn.sysConns { // close all accepted conns
+			conn.osConnsLock.Lock()
+			for _, tcpconn := range conn.osConns { // close all accepted conns
 				conn.writeToWithFlags(nil, tcpconn.RemoteAddr(), false, false, true, true, false)
 				tcpconn.Close()
 			}
-			conn.sysConns = nil
-			conn.sysConnsLock.Unlock()
+			conn.osConns = nil
+			conn.osConnsLock.Unlock()
 		}
 
 		// stop capturing
@@ -327,13 +327,13 @@ func (conn *TCPConn) closePeer(addr net.Addr) {
 	if conn.tcpconn != nil {
 		conn.tcpconn.Close()
 	} else if conn.listener != nil {
-		conn.sysConnsLock.Lock()
-		if c, ok := conn.sysConns[addr.String()]; ok {
+		conn.osConnsLock.Lock()
+		if c, ok := conn.osConns[addr.String()]; ok {
 			// close and delete
 			c.Close()
-			delete(conn.sysConns, addr.String())
+			delete(conn.osConns, addr.String())
 		}
-		conn.sysConnsLock.Unlock()
+		conn.osConnsLock.Unlock()
 	}
 }
 
@@ -500,7 +500,7 @@ func Listen(network, address string) (*TCPConn, error) {
 
 	// fields
 	conn := new(TCPConn)
-	conn.sysConns = make(map[string]net.Conn)
+	conn.osConns = make(map[string]net.Conn)
 	conn.handles = handles
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
@@ -522,9 +522,9 @@ func Listen(network, address string) (*TCPConn, error) {
 			}
 
 			// record original connections for proper closing
-			conn.sysConnsLock.Lock()
-			conn.sysConns[tcpconn.LocalAddr().String()] = tcpconn
-			conn.sysConnsLock.Unlock()
+			conn.osConnsLock.Lock()
+			conn.osConns[tcpconn.LocalAddr().String()] = tcpconn
+			conn.osConnsLock.Unlock()
 			go func() { io.Copy(ioutil.Discard, tcpconn) }()
 		}
 	}()
