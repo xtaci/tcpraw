@@ -23,3 +23,9 @@ A packet-oriented connection by simulating tcp protocol
 ## Documentation
 
 For complete documentation, see the associated [Godoc](https://godoc.org/github.com/xtaci/tcpraw).
+
+
+## Tips
+```
+sudo tcpdump -v -n -i lo0 ip and 'ip[8]>0' and tcp and port 3457
+```

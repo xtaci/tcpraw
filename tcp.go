@@ -212,7 +212,7 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 				}
 
 			})
-			if init {
+			if init { //send back SYN+ACk
 				conn.writeToWithFlags(nil, addr, true, false, true, false, false)
 			}
 		}
@@ -329,7 +329,6 @@ func (conn *TCPConn) closePeer(addr net.Addr) {
 	} else if conn.listener != nil {
 		conn.osConnsLock.Lock()
 		if c, ok := conn.osConns[addr.String()]; ok {
-			// close and delete
 			c.Close()
 			delete(conn.osConns, addr.String())
 		}
@@ -505,7 +504,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
 	conn.listener = l
-	conn.setTTL(l, 0) // prevent tcpconn from sending ACKs
+	conn.setTTL(l, 0)
 	conn.chMessage = make(chan message)
 	go conn.cleaner()
 
