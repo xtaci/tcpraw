@@ -370,7 +370,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 	defer inactive.CleanUp()
 
-	inactive.SetSnapLen(1500)
+	inactive.SetSnapLen(2048)
 	inactive.SetImmediateMode(true)
 
 	handle, err := inactive.Activate()
@@ -453,7 +453,7 @@ func Listen(network, address string) (*TCPConn, error) {
 				}
 				defer inactive.CleanUp()
 
-				inactive.SetSnapLen(1500)
+				inactive.SetSnapLen(2048)
 				inactive.SetImmediateMode(true)
 
 				if handle, err := inactive.Activate(); err == nil {
@@ -489,7 +489,7 @@ func Listen(network, address string) (*TCPConn, error) {
 		}
 		defer inactive.CleanUp()
 
-		inactive.SetSnapLen(1500)
+		inactive.SetSnapLen(2048)
 		inactive.SetImmediateMode(true)
 
 		if handle, err := inactive.Activate(); err == nil {
