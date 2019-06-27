@@ -364,7 +364,16 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// pcap init
-	handle, err := pcap.OpenLive(ifaceName, 65536, false, time.Millisecond)
+	inactive, err := pcap.NewInactiveHandle(ifaceName)
+	if err != nil {
+		return nil, err
+	}
+	defer inactive.CleanUp()
+
+	inactive.SetSnapLen(1500)
+	inactive.SetImmediateMode(true)
+
+	handle, err := inactive.Activate()
 	if err != nil {
 		return nil, err
 	}
@@ -438,7 +447,16 @@ func Listen(network, address string) (*TCPConn, error) {
 				}
 
 				// try open on all nics
-				if handle, err := pcap.OpenLive(iface.Name, 65536, false, time.Millisecond); err == nil {
+				inactive, err := pcap.NewInactiveHandle(iface.Name)
+				if err != nil {
+					return nil, err
+				}
+				defer inactive.CleanUp()
+
+				inactive.SetSnapLen(1500)
+				inactive.SetImmediateMode(true)
+
+				if handle, err := inactive.Activate(); err == nil {
 					// apply filter
 					filter := fmt.Sprintf("tcp and %v and dst port %v", dsthost, laddr.Port)
 					if err := handle.SetBPFFilter(filter); err != nil {
@@ -463,18 +481,27 @@ func Listen(network, address string) (*TCPConn, error) {
 		if ifaceName == "" {
 			return nil, errors.New("cannot find correct interface")
 		}
+
 		// pcap init
-		handle, err := pcap.OpenLive(ifaceName, 65536, false, time.Millisecond)
+		inactive, err := pcap.NewInactiveHandle(ifaceName)
 		if err != nil {
 			return nil, err
 		}
+		defer inactive.CleanUp()
 
-		// apply filter
-		filter := fmt.Sprintf("tcp and dst host %v and dst port %v", laddr.IP, laddr.Port)
-		if err := handle.SetBPFFilter(filter); err != nil {
+		inactive.SetSnapLen(1500)
+		inactive.SetImmediateMode(true)
+
+		if handle, err := inactive.Activate(); err == nil {
+			// apply filter
+			filter := fmt.Sprintf("tcp and dst host %v and dst port %v", laddr.IP, laddr.Port)
+			if err := handle.SetBPFFilter(filter); err != nil {
+				return nil, err
+			}
+			handles = []*pcap.Handle{handle}
+		} else {
 			return nil, err
 		}
-		handles = []*pcap.Handle{handle}
 	}
 
 	// start listening
