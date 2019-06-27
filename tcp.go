@@ -143,7 +143,6 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 			}
 			addr := &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}
 
-			var init bool
 			conn.lockflow(addr, func(e *tcpFlow) {
 				e.ts = time.Now()
 				e.seq = transport.Ack // update sequence number for every incoming packet
@@ -193,7 +192,6 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 						// this tcp flow is ready to operate based on flow information
 						if e.linkLayer != nil && e.networkLayer != nil {
 							close(e.ready)
-							init = true
 						}
 					}
 				} else if transport.PSH {
@@ -210,11 +208,7 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 					e.ack++
 					conn.closePeer(addr)
 				}
-
 			})
-			if init { //send back SYN+ACk
-				conn.writeToWithFlags(nil, addr, true, false, true, false, false)
-			}
 		}
 	}()
 }
@@ -420,7 +414,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.handles = []*pcap.Handle{handle}
 	conn.tcpconn = tcpconn
-	conn.setTTL(tcpconn, 0) // prevent tcpconn from sending ACKs
+	conn.setTTL(tcpconn, 1) // prevent tcpconn from sending ACKs
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
 
@@ -515,7 +509,6 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
 	conn.listener = l
-	conn.setTTL(l, 0)
 	conn.chMessage = make(chan message)
 	go conn.cleaner()
 
@@ -530,6 +523,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			if err != nil {
 				return
 			}
+			conn.setTTL(tcpconn, 1)
 
 			// record original connections for proper closing
 			conn.osConnsLock.Lock()
