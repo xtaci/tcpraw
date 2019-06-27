@@ -124,7 +124,6 @@ func TestDialToTCPPacket(t *testing.T) {
 	} else {
 		t.Log(string(buf[:n]), "from:", addr)
 	}
+	conn.Close()
 	s.Close()
-	//	<-time.After(time.Minute)
-	//conn.Close()
 }
