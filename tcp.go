@@ -451,10 +451,21 @@ func Listen(network, address string) (*TCPConn, error) {
 	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all ifaces
 		for _, iface := range ifaces {
 			if len(iface.Addresses) > 0 {
+				// build dst host
+				var dsthost = "("
+				for k := range iface.Addresses {
+					dsthost += "dst host " + iface.Addresses[k].IP.String()
+					if k != len(iface.Addresses)-1 {
+						dsthost += " or "
+					} else {
+						dsthost += ")"
+					}
+				}
+
 				// try open on all nics
 				if handle, err := pcap.OpenLive(iface.Name, 65536, true, time.Second); err == nil {
 					// apply filter
-					filter := fmt.Sprintf("tcp and dst port %v", laddr.Port)
+					filter := fmt.Sprintf("tcp and %v and dst port %v", dsthost, laddr.Port)
 					if err := handle.SetBPFFilter(filter); err != nil {
 						return nil, err
 					}
