@@ -281,13 +281,11 @@ func (conn *TCPConn) Close() error {
 
 		// close all socket connections
 		if conn.tcpconn != nil {
-			conn.setTTL(conn.tcpconn, 64) // recover ttl before close, so it can say goodbye
 			err = conn.tcpconn.Close()
 		} else if conn.listener != nil {
 			err = conn.listener.Close() // close listener
 			conn.sysConnsLock.Lock()
 			for k := range conn.sysConns { // close all accepted conns
-				conn.setTTL(conn.sysConns[k], 64)
 				conn.sysConns[k].Close()
 			}
 			conn.sysConns = nil
@@ -301,12 +299,11 @@ func (conn *TCPConn) Close() error {
 // called from captureFlow
 func (conn *TCPConn) closePeer(addr net.Addr) {
 	if conn.tcpconn != nil {
-		conn.setTTL(conn.tcpconn, 64)
 		conn.tcpconn.Close()
 	} else if conn.listener != nil {
 		conn.sysConnsLock.Lock()
 		if c, ok := conn.sysConns[addr.String()]; ok {
-			conn.setTTL(c, 64)
+			// close and delete
 			c.Close()
 			delete(conn.sysConns, addr.String())
 		}
