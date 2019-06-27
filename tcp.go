@@ -389,7 +389,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// pcap init
-	handle, err := pcap.OpenLive(ifaceName, 65536, true, time.Second)
+	handle, err := pcap.OpenLive(ifaceName, 65536, false, time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -463,7 +463,7 @@ func Listen(network, address string) (*TCPConn, error) {
 				}
 
 				// try open on all nics
-				if handle, err := pcap.OpenLive(iface.Name, 65536, true, time.Second); err == nil {
+				if handle, err := pcap.OpenLive(iface.Name, 65536, false, time.Second); err == nil {
 					// apply filter
 					filter := fmt.Sprintf("tcp and %v and dst port %v", dsthost, laddr.Port)
 					if err := handle.SetBPFFilter(filter); err != nil {
@@ -489,7 +489,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			return nil, errors.New("cannot find correct interface")
 		}
 		// pcap init
-		handle, err := pcap.OpenLive(ifaceName, 65536, true, time.Second)
+		handle, err := pcap.OpenLive(ifaceName, 65536, false, time.Second)
 		if err != nil {
 			return nil, err
 		}
