@@ -124,9 +124,8 @@ func (conn *TCPConn) setTTL(x interface{}, ttl int) (err error) {
 
 // captureFlow capture each packets inbound based on rules of BPF
 func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
-	source := gopacket.NewPacketSource(handle, handle.LinkType())
-
 	go func() {
+		source := gopacket.NewPacketSource(handle, handle.LinkType())
 		for packet := range source.Packets() {
 			transport := packet.TransportLayer().(*layers.TCP)
 
@@ -365,7 +364,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// pcap init
-	handle, err := pcap.OpenLive(ifaceName, 65536, false, pcap.BlockForever)
+	handle, err := pcap.OpenLive(ifaceName, 65536, false, time.Millisecond)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +438,7 @@ func Listen(network, address string) (*TCPConn, error) {
 				}
 
 				// try open on all nics
-				if handle, err := pcap.OpenLive(iface.Name, 65536, false, pcap.BlockForever); err == nil {
+				if handle, err := pcap.OpenLive(iface.Name, 65536, false, time.Millisecond); err == nil {
 					// apply filter
 					filter := fmt.Sprintf("tcp and %v and dst port %v", dsthost, laddr.Port)
 					if err := handle.SetBPFFilter(filter); err != nil {
@@ -465,7 +464,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			return nil, errors.New("cannot find correct interface")
 		}
 		// pcap init
-		handle, err := pcap.OpenLive(ifaceName, 65536, false, time.Second)
+		handle, err := pcap.OpenLive(ifaceName, 65536, false, time.Millisecond)
 		if err != nil {
 			return nil, err
 		}

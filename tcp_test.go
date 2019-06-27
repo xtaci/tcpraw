@@ -3,7 +3,9 @@ package tcpraw
 import (
 	"log"
 	"net"
+	"sync"
 	"testing"
+	"time"
 )
 
 //const testPortStream = "127.0.0.1:3456"
@@ -47,11 +49,8 @@ func startTCPRawServer() *TCPConn {
 				log.Println("server readfrom:", err)
 				return
 			}
-			log.Println("echo-received")
-
 			//echo
 			n, err = conn.WriteTo(buf[:n], addr)
-			log.Println("echo-reply")
 			if err != nil {
 				log.Println("server writeTo:", err)
 				return
@@ -104,7 +103,7 @@ func TestDialTCPStream(t *testing.T) {
 }
 
 func TestDialToTCPPacket(t *testing.T) {
-	s := startTCPRawServer()
+	_ = startTCPRawServer()
 	conn, err := Dial("tcp", portRemotePacket)
 	if err != nil {
 		t.Fatal(err)
@@ -126,13 +125,17 @@ func TestDialToTCPPacket(t *testing.T) {
 	} else {
 		t.Log(string(buf[:n]), "from:", addr)
 	}
-	conn.Close()
-	s.Close()
+	//conn.Close()
+	//s.Close()
+	<-time.After(time.Minute)
 }
 
+var bOnce sync.Once
+
 func BenchmarkEcho(b *testing.B) {
-	s := startTCPRawServer()
-	defer s.Close()
+	bOnce.Do(func() {
+		startTCPRawServer()
+	})
 	conn, err := Dial("tcp", portRemotePacket)
 	if err != nil {
 		b.Fatal(err)
@@ -146,7 +149,6 @@ func BenchmarkEcho(b *testing.B) {
 
 	buf := make([]byte, 1500)
 	for i := 0; i < b.N; i++ {
-		log.Println(i)
 		n, err := conn.WriteTo([]byte("abc"), addr)
 		if err != nil {
 			b.Fatal(n, err)
