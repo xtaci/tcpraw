@@ -12,7 +12,7 @@ import (
 //const testPortPacket = "127.0.0.1:3457"
 
 const testPortStream = "[::1]:3456"
-const portServerPacket = "127.0.0.1:3457"
+const portServerPacket = ":3457"
 const portRemotePacket = "127.0.0.1:3457"
 
 func init() {
