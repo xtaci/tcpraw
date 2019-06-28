@@ -3,6 +3,8 @@ package tcpraw
 import (
 	"log"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"testing"
 )
 
@@ -16,6 +18,9 @@ const portRemotePacket = "127.0.0.1:3457"
 func init() {
 	startTCPServer()
 	startTCPRawServer()
+	go func() {
+		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+	}()
 }
 
 func startTCPServer() net.Listener {
@@ -25,6 +30,7 @@ func startTCPServer() net.Listener {
 	}
 
 	go func() {
+		defer l.Close()
 		for {
 			conn, err := l.Accept()
 			if err != nil {
@@ -45,6 +51,7 @@ func startTCPRawServer() *TCPConn {
 	}
 
 	go func() {
+		defer conn.Close()
 		for {
 			buf := make([]byte, 128)
 			n, addr, err := conn.ReadFrom(buf)
@@ -83,6 +90,7 @@ func TestDialTCPStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer conn.Close()
 
 	addr, err := net.ResolveTCPAddr("tcp", testPortStream)
 	if err != nil {
@@ -98,9 +106,8 @@ func TestDialTCPStream(t *testing.T) {
 	if n, addr, err := conn.ReadFrom(buf); err != nil {
 		t.Fatal(n, addr, err)
 	} else {
-		t.Log(string(buf[:n]), "from:", addr)
+		log.Println(string(buf[:n]), "from:", addr)
 	}
-	conn.Close()
 }
 
 func TestDialToTCPPacket(t *testing.T) {
@@ -108,6 +115,7 @@ func TestDialToTCPPacket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer conn.Close()
 
 	addr, err := net.ResolveTCPAddr("tcp", portRemotePacket)
 	if err != nil {
@@ -121,11 +129,15 @@ func TestDialToTCPPacket(t *testing.T) {
 	log.Println("written")
 
 	buf := make([]byte, 1500)
+	log.Println("readfrom buf")
 	if n, addr, err := conn.ReadFrom(buf); err != nil {
+		log.Println(err)
 		t.Fatal(n, addr, err)
 	} else {
-		t.Log(string(buf[:n]), "from:", addr)
+		log.Println(string(buf[:n]), "from:", addr)
 	}
+
+	log.Println("complete")
 }
 
 func BenchmarkEcho(b *testing.B) {
