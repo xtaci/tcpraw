@@ -414,6 +414,12 @@ func Dial(network, address string) (*TCPConn, error) {
 	if err := conn.setTTL(tcpconn, 0); err != nil {
 		// cannot set TTL to 0
 		// use iptables instead
+		// try set TTL to 1
+		err = conn.setTTL(tcpconn, 1)
+		if err != nil {
+			return nil, err
+		}
+
 		var protocol iptables.Protocol
 		if laddr.IP.To4() == nil {
 			protocol = iptables.ProtocolIPv6
@@ -424,12 +430,6 @@ func Dial(network, address string) (*TCPConn, error) {
 		}
 
 		ipt, err := iptables.NewWithProtocol(protocol)
-		if err != nil {
-			return nil, err
-		}
-
-		// try set TTL to 1
-		err = conn.setTTL(tcpconn, 1)
 		if err != nil {
 			return nil, err
 		}
@@ -553,6 +553,12 @@ func Listen(network, address string) (*TCPConn, error) {
 	if err := conn.setTTL(l, 0); err != nil {
 		// cannot set TTL to 0
 		// use iptables instead
+		// try set TTL to 1
+		err = conn.setTTL(l, 1)
+		if err != nil {
+			return nil, err
+		}
+
 		var protocol iptables.Protocol
 		if laddr.IP.To4() == nil {
 			protocol = iptables.ProtocolIPv6
@@ -562,12 +568,6 @@ func Listen(network, address string) (*TCPConn, error) {
 			conn.iptrule = []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
 		}
 		ipt, err := iptables.NewWithProtocol(protocol)
-		if err != nil {
-			return nil, err
-		}
-
-		// try set TTL to 1
-		err = conn.setTTL(l, 1)
 		if err != nil {
 			return nil, err
 		}
