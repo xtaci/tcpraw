@@ -33,18 +33,13 @@ type message struct {
 
 // tcp flow information for a connection pair
 type tcpFlow struct {
-	handle *pcap.Handle  // used in WriteTo to WritePacketData
-	ready  chan struct{} // mark whether the flow is ready to WriteTo
-	seq    uint32
-	ack    uint32
-	// out
+	handle       *pcap.Handle  // used in WriteTo to WritePacketData
+	ready        chan struct{} // mark whether the flow is ready to WriteTo
+	seq          uint32
+	ack          uint32
 	linkLayer    gopacket.SerializableLayer // link layer header
 	networkLayer gopacket.SerializableLayer // network layer header
-	//in
-	inLinkLayer    gopacket.SerializableLayer // link layer header
-	inNetworkLayer gopacket.SerializableLayer // link layer header
-
-	ts time.Time // last packet incoming
+	ts           time.Time                  // last packet incoming
 }
 
 // TCPConn defines a TCP-packet oriented connection
@@ -168,11 +163,9 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 								SrcMAC:       ethLayer.DstMAC,
 								DstMAC:       ethLayer.SrcMAC,
 							}
-							e.inLinkLayer = ethLayer
 						} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
 							loopLayer := layer.(*layers.Loopback)
 							e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
-							e.inLinkLayer = loopLayer
 						}
 
 						// create network layer for WriteTo
@@ -186,7 +179,6 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 								Flags:    layers.IPv4DontFragment,
 								TTL:      64,
 							}
-							e.inNetworkLayer = network
 						} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
 							network := layer.(*layers.IPv6)
 							e.networkLayer = &layers.IPv6{
@@ -196,7 +188,6 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 								DstIP:      network.SrcIP,
 								HopLimit:   64,
 							}
-							e.inNetworkLayer = network
 						}
 
 						// this tcp flow is ready to operate based on flow information
@@ -285,24 +276,7 @@ func (conn *TCPConn) writeToWithFlags(p []byte, addr net.Addr, SYN bool, PSH boo
 			return 0, err
 		}
 
-		tcpIn := &layers.TCP{
-			SrcPort: layers.TCPPort(tcpaddr.Port),
-			DstPort: layers.TCPPort(localAddr.Port),
-			Window:  12580,
-			Ack:     flow.seq,
-			Seq:     flow.ack,
-			SYN:     SYN,
-			PSH:     PSH,
-			ACK:     ACK,
-			FIN:     FIN,
-			RST:     RST,
-		}
-
-		tcpIn.SetNetworkLayerForChecksum(flow.networkLayer.(gopacket.NetworkLayer))
-
-		gopacket.SerializeLayers(buf, opts, flow.inLinkLayer, flow.inNetworkLayer, tcpIn, payload)
 		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
-
 		return len(p), nil
 	}
 }
@@ -432,7 +406,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
-	log.Println(conn.setTTL(tcpconn, 1))
+	conn.setTTL(tcpconn, 1)
 
 	// discards data flow on tcp conn
 	go func() {
