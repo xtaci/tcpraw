@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math/rand"
 	"net"
 	"sync"
 	"syscall"
@@ -19,8 +18,6 @@ import (
 
 var (
 	errOpNotImplemented = errors.New("operation not implemented")
-	errIncompatibleOS   = errors.New("incompatible os")
-	source              = rand.NewSource(time.Now().UnixNano())
 	expire              = 30 * time.Minute
 )
 
