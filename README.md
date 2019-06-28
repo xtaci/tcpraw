@@ -18,9 +18,7 @@ A packet-oriented connection by simulating tcp protocol
 
 ## Features
 
-1. Tiny, only one file.
-2. Cross-platform .
-3. Support IPv4 and IPv6.
+1. Support IPv4 and IPv6.
 
 ## Documentation
 
