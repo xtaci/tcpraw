@@ -411,35 +411,31 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
-	if err := conn.setTTL(tcpconn, 0); err != nil {
-		// cannot set TTL to 0
-		// use iptables instead
-		// try set TTL to 1
-		err = conn.setTTL(tcpconn, 1)
-		if err != nil {
-			return nil, err
-		}
-
-		var protocol iptables.Protocol
-		if laddr.IP.To4() == nil {
-			protocol = iptables.ProtocolIPv6
-			conn.iptrule = []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		} else {
-			protocol = iptables.ProtocolIPv4
-			conn.iptrule = []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		}
-
-		ipt, err := iptables.NewWithProtocol(protocol)
-		if err != nil {
-			return nil, err
-		}
-
-		err = ipt.Append("filter", "OUTPUT", conn.iptrule...)
-		if err != nil {
-			return nil, err
-		}
-		conn.ipt = ipt
+	// iptables
+	err = conn.setTTL(tcpconn, 1)
+	if err != nil {
+		return nil, err
 	}
+
+	var protocol iptables.Protocol
+	if laddr.IP.To4() == nil {
+		protocol = iptables.ProtocolIPv6
+		conn.iptrule = []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+	} else {
+		protocol = iptables.ProtocolIPv4
+		conn.iptrule = []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+	}
+
+	ipt, err := iptables.NewWithProtocol(protocol)
+	if err != nil {
+		return nil, err
+	}
+
+	err = ipt.Append("filter", "OUTPUT", conn.iptrule...)
+	if err != nil {
+		return nil, err
+	}
+	conn.ipt = ipt
 
 	// discards data flow on tcp conn
 	go func() {
@@ -549,36 +545,29 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn.handles = handles
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
-	conn.listener = l
-	if err := conn.setTTL(l, 0); err != nil {
-		// cannot set TTL to 0
-		// use iptables instead
-		// try set TTL to 1
-		err = conn.setTTL(l, 1)
-		if err != nil {
-			return nil, err
-		}
-
-		var protocol iptables.Protocol
-		if laddr.IP.To4() == nil {
-			protocol = iptables.ProtocolIPv6
-			conn.iptrule = []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		} else {
-			protocol = iptables.ProtocolIPv4
-			conn.iptrule = []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		}
-		ipt, err := iptables.NewWithProtocol(protocol)
-		if err != nil {
-			return nil, err
-		}
-
-		err = ipt.Append("filter", "OUTPUT", conn.iptrule...)
-		if err != nil {
-			return nil, err
-		}
-		conn.ipt = ipt
-	}
 	conn.chMessage = make(chan message)
+	conn.listener = l
+
+	// iptables
+	var protocol iptables.Protocol
+	if laddr.IP.To4() == nil {
+		protocol = iptables.ProtocolIPv6
+		conn.iptrule = []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+	} else {
+		protocol = iptables.ProtocolIPv4
+		conn.iptrule = []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+	}
+	ipt, err := iptables.NewWithProtocol(protocol)
+	if err != nil {
+		return nil, err
+	}
+
+	err = ipt.Append("filter", "OUTPUT", conn.iptrule...)
+	if err != nil {
+		return nil, err
+	}
+	conn.ipt = ipt
+
 	go conn.cleaner()
 
 	for k := range handles {
@@ -593,10 +582,7 @@ func Listen(network, address string) (*TCPConn, error) {
 				return
 			}
 
-			if err := conn.setTTL(tcpconn, 0); err != nil {
-				conn.setTTL(tcpconn, 1)
-			}
-
+			conn.setTTL(tcpconn, 1)
 			conn.osConnsLock.Lock()
 			conn.osConns[tcpconn.LocalAddr().String()] = tcpconn
 			conn.osConnsLock.Unlock()
@@ -608,5 +594,4 @@ func Listen(network, address string) (*TCPConn, error) {
 	}()
 
 	return conn, nil
-
 }
