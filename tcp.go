@@ -173,7 +173,6 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 								DstIP:    network.SrcIP,
 								Protocol: network.Protocol,
 								Version:  network.Version,
-								Id:       network.Id,
 								Flags:    layers.IPv4DontFragment,
 								TTL:      64,
 							}
