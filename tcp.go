@@ -62,8 +62,11 @@ type TCPConn struct {
 	flowsLock sync.Mutex
 
 	// iptables
-	ipt     *iptables.IPTables
-	iptrule []string
+	iptables *iptables.IPTables
+	iprule   []string
+
+	ip6tables *iptables.IPTables
+	ip6rule   []string
 }
 
 // lockflow locks the flow table and apply function f on the entry
@@ -309,9 +312,13 @@ func (conn *TCPConn) Close() error {
 		}
 
 		// delete iptable
-		if conn.ipt != nil {
-			conn.ipt.Delete("filter", "OUTPUT", conn.iptrule...)
+		if conn.iptables != nil {
+			conn.iptables.Delete("filter", "OUTPUT", conn.iprule...)
 		}
+		if conn.ip6tables != nil {
+			conn.ip6tables.Delete("filter", "OUTPUT", conn.ip6rule...)
+		}
+
 	})
 	return err
 }
@@ -411,31 +418,27 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
 	conn.captureFlow(handle)
+
 	// iptables
 	err = conn.setTTL(tcpconn, 1)
 	if err != nil {
 		return nil, err
 	}
 
-	var protocol iptables.Protocol
-	if laddr.IP.To4() == nil {
-		protocol = iptables.ProtocolIPv6
-		conn.iptrule = []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-	} else {
-		protocol = iptables.ProtocolIPv4
-		conn.iptrule = []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
+		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+		if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+			conn.iprule = rule
+			conn.iptables = ipt
+		}
 	}
-
-	ipt, err := iptables.NewWithProtocol(protocol)
-	if err != nil {
-		return nil, err
+	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
+		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+		if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+			conn.ip6rule = rule
+			conn.ip6tables = ipt
+		}
 	}
-
-	err = ipt.Append("filter", "OUTPUT", conn.iptrule...)
-	if err != nil {
-		return nil, err
-	}
-	conn.ipt = ipt
 
 	// discards data flow on tcp conn
 	go func() {
@@ -549,26 +552,20 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn.listener = l
 
 	// iptables
-	var protocol iptables.Protocol
-	if laddr.IP.To4() == nil {
-		protocol = iptables.ProtocolIPv6
-		conn.iptrule = []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-	} else {
-		protocol = iptables.ProtocolIPv4
-		conn.iptrule = []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
+		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+		if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+			conn.iprule = rule
+			conn.iptables = ipt
+		}
 	}
-	ipt, err := iptables.NewWithProtocol(protocol)
-	if err != nil {
-		return nil, err
+	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
+		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+		if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+			conn.ip6rule = rule
+			conn.ip6tables = ipt
+		}
 	}
-
-	err = ipt.Append("filter", "OUTPUT", conn.iptrule...)
-	if err != nil {
-		return nil, err
-	}
-	conn.ipt = ipt
-
-	go conn.cleaner()
 
 	for k := range handles {
 		conn.captureFlow(handles[k])
