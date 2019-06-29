@@ -423,17 +423,25 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
-		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-			conn.iprule = rule
-			conn.iptables = ipt
+		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
+		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
+			if !exists {
+				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+					conn.iprule = rule
+					conn.iptables = ipt
+				}
+			}
 		}
 	}
 	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
-		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr.IP.String(), "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-			conn.ip6rule = rule
-			conn.ip6tables = ipt
+		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
+		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
+			if !exists {
+				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+					conn.ip6rule = rule
+					conn.ip6tables = ipt
+				}
+			}
 		}
 	}
 
@@ -551,16 +559,24 @@ func Listen(network, address string) (*TCPConn, error) {
 	// iptables
 	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
 		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-			conn.iprule = rule
-			conn.iptables = ipt
+		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
+			if !exists {
+				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+					conn.iprule = rule
+					conn.iptables = ipt
+				}
+			}
 		}
 	}
 	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
 		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-			conn.ip6rule = rule
-			conn.ip6tables = ipt
+		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
+			if !exists {
+				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+					conn.ip6rule = rule
+					conn.ip6tables = ipt
+				}
+			}
 		}
 	}
 
