@@ -170,14 +170,14 @@ func BenchmarkEcho(b *testing.B) {
 }
 
 func TestCompileBPF(t *testing.T) {
-	filter := fmt.Sprintf("tcp and dst host 192.168.1.1 and dst port 255 and src host 192.168.1.2 and src port 256")
+	filter := fmt.Sprintf("tcp and dst host 192.168.1.1 and dst port 255 and src host 192.168.1.1 and src port 256")
 	log.Println(filter)
 	if bpf, err := pcap.CompileBPFFilter(layers.LinkTypeIPv4, 1500, filter); err == nil {
 		log.Printf("ipv4: %v", bpf)
 	} else {
 		t.Fatal(err)
 	}
-	filter = fmt.Sprintf("tcp and dst host ::192.168.1.1 and dst port 255 and src host ::192.168.1.2 and src port 256")
+	filter = fmt.Sprintf("tcp and dst host ::1 and dst port 255 and src host ::2 and src port 256")
 	if bpf, err := pcap.CompileBPFFilter(layers.LinkTypeIPv6, 1500, filter); err == nil {
 		log.Printf("ipv6: %v", bpf)
 	} else {
