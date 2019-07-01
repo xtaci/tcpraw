@@ -290,6 +290,7 @@ func (conn *TCPConn) writeToWithFlags(p []byte, addr net.Addr, SYN bool, PSH boo
 		if err := flow.handle.WritePacketData(buf.Bytes()); err != nil {
 			return 0, err
 		}
+		buf.Clear()
 
 		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
 		return len(p), nil
