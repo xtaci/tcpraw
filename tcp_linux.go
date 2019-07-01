@@ -25,7 +25,7 @@ var (
 
 type message struct {
 	bts  []byte
-	addr net.Addr
+	addr string
 }
 
 // tcp flow information for a connection pair
@@ -52,9 +52,8 @@ type TCPConn struct {
 	osConnsLock sync.Mutex
 
 	// gopacket
-	handles      []*pcap.Handle
-	packetSource *gopacket.PacketSource
-	chMessage    chan message // incoming packets channel
+	handles   []*pcap.Handle
+	chMessage chan message // incoming packets channel
 
 	// important TCP header information
 	flowTable map[string]tcpFlow
@@ -134,24 +133,27 @@ func (conn *TCPConn) setTTL(x interface{}, ttl int) (err error) {
 func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 	go func() {
 		defer handle.Close()
-		source := gopacket.NewPacketSource(handle, handle.LinkType())
-		for packet := range source.Packets() {
+
+		for {
+			data, _, err := handle.ZeroCopyReadPacketData()
+			if err != nil {
+				return
+			}
+			packet := gopacket.NewPacket(data, handle.LinkType(), gopacket.DecodeOptions{NoCopy: true, Lazy: true})
 			transport := packet.TransportLayer().(*layers.TCP)
 
-			// build address
-			var ip []byte
+			// build transient address
+			var addr net.TCPAddr
+			addr.Port = int(transport.SrcPort)
 			if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
 				network := layer.(*layers.IPv4)
-				ip = make([]byte, len(network.SrcIP))
-				copy(ip, network.SrcIP)
+				addr.IP = network.SrcIP
 			} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
 				network := layer.(*layers.IPv6)
-				ip = make([]byte, len(network.SrcIP))
-				copy(ip, network.SrcIP)
+				addr.IP = network.SrcIP
 			}
-			addr := &net.TCPAddr{IP: ip, Port: int(transport.SrcPort)}
 
-			conn.lockflow(addr, func(e *tcpFlow) {
+			conn.lockflow(&addr, func(e *tcpFlow) {
 				e.ts = time.Now()
 				if transport.ACK {
 					e.seq = transport.Ack
@@ -209,8 +211,10 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 			})
 
 			if transport.PSH {
+				payload := make([]byte, len(transport.Payload))
+				copy(payload, transport.Payload)
 				select {
-				case conn.chMessage <- message{transport.Payload, addr}:
+				case conn.chMessage <- message{payload, addr.String()}:
 				case <-conn.die:
 					return
 				}
@@ -226,7 +230,8 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, io.EOF
 	case packet := <-conn.chMessage:
 		n = copy(p, packet.bts)
-		return n, packet.addr, nil
+		addr, _ = net.ResolveTCPAddr("tcp", packet.addr)
+		return n, addr, nil
 	}
 }
 

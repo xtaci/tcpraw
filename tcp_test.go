@@ -157,6 +157,7 @@ func BenchmarkEcho(b *testing.B) {
 	}
 
 	buf := make([]byte, 1500)
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		n, err := conn.WriteTo([]byte("abc"), addr)
 		if err != nil {
