@@ -3,6 +3,7 @@
 package tcpraw
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -14,8 +15,8 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/afpacket"
 	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
 )
 
 var (
@@ -30,8 +31,8 @@ type message struct {
 
 // tcp flow information for a connection pair
 type tcpFlow struct {
-	handle       *pcap.Handle  // used in WriteTo to WritePacketData
-	ready        chan struct{} // mark whether the flow is ready to WriteTo
+	handle       *afpacket.TPacket // used in WriteTo to WritePacketData
+	ready        chan struct{}     // mark whether the flow is ready to WriteTo
 	seq          uint32
 	ack          uint32
 	linkLayer    gopacket.SerializableLayer // link layer header
@@ -52,7 +53,7 @@ type TCPConn struct {
 	osConnsLock sync.Mutex
 
 	// gopacket
-	handles   []*pcap.Handle
+	handles   []*afpacket.TPacket
 	chMessage chan message // incoming packets channel
 
 	// important TCP header information
@@ -130,27 +131,51 @@ func (conn *TCPConn) setTTL(x interface{}, ttl int) (err error) {
 }
 
 // captureFlow capture each packets inbound based on rules of BPF
-func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
-	go func() {
-		defer handle.Close()
+func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
+	defer handle.Close()
 
-		for {
-			data, _, err := handle.ZeroCopyReadPacketData()
-			if err != nil {
-				return
-			}
-			packet := gopacket.NewPacket(data, handle.LinkType(), gopacket.DecodeOptions{NoCopy: true, Lazy: true})
-			transport := packet.TransportLayer().(*layers.TCP)
+	for {
+		data, _, err := handle.ZeroCopyReadPacketData()
+		if err != nil {
+			return
+		}
+		packet := gopacket.NewPacket(data, layers.LinkTypeEthernet, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
+		transport := packet.TransportLayer().(*layers.TCP)
+		if transport == nil { // retry on loopback link layer
+			packet = gopacket.NewPacket(data, layers.LinkTypeLoop, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
+			transport = packet.TransportLayer().(*layers.TCP)
+		}
 
+		if transport != nil {
 			// build transient address
 			var addr net.TCPAddr
 			addr.Port = int(transport.SrcPort)
+			var toAddr net.TCPAddr
+			toAddr.Port = int(transport.DstPort)
+
 			if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
 				network := layer.(*layers.IPv4)
 				addr.IP = network.SrcIP
+				toAddr.IP = network.DstIP
 			} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
 				network := layer.(*layers.IPv6)
 				addr.IP = network.SrcIP
+				toAddr.IP = network.DstIP
+			}
+
+			if conn.tcpconn != nil {
+				laddr := conn.tcpconn.RemoteAddr().(*net.TCPAddr)
+				if laddr.Port != addr.Port {
+					continue
+				}
+				if bytes.Compare(laddr.IP, addr.IP) != 0 {
+					continue
+				}
+			} else {
+				laddr := conn.listener.Addr().(*net.TCPAddr)
+				if laddr.Port != toAddr.Port {
+					continue
+				}
 			}
 
 			conn.lockflow(&addr, func(e *tcpFlow) {
@@ -220,7 +245,7 @@ func (conn *TCPConn) captureFlow(handle *pcap.Handle) {
 				}
 			}
 		}
-	}()
+	}
 }
 
 // ReadFrom implements the PacketConn ReadFrom method.
@@ -384,17 +409,11 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, errors.New("cannot find correct interface")
 	}
 
-	// pcap init
-	inactive, err := pcap.NewInactiveHandle(ifaceName)
-	if err != nil {
-		return nil, err
-	}
-	defer inactive.CleanUp()
-
-	inactive.SetSnapLen(2048)
-	inactive.SetImmediateMode(true)
-
-	handle, err := inactive.Activate()
+	// afpacket init
+	handle, err := afpacket.NewTPacket(
+		afpacket.OptInterface(ifaceName),
+		afpacket.SocketRaw,
+		afpacket.TPacketVersion3)
 	if err != nil {
 		return nil, err
 	}
@@ -406,11 +425,13 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 	dummy.Close()
 
-	// apply filter for incoming data
-	filter := fmt.Sprintf("tcp and dst host %v and dst port %v and src host %v and src port %v", laddr.IP, laddr.Port, raddr.IP, raddr.Port)
-	if err := handle.SetBPFFilter(filter); err != nil {
-		return nil, err
-	}
+	// TODO:apply filter for incoming data
+	/*
+		filter := fmt.Sprintf("tcp and dst host %v and dst port %v and src host %v and src port %v", laddr.IP, laddr.Port, raddr.IP, raddr.Port)
+		if err := handle.SetBPFFilter(filter); err != nil {
+			return nil, err
+		}
+	*/
 
 	// create an established tcp connection
 	// will hack this tcp connection for packet transmission
@@ -423,10 +444,10 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
 	conn.die = make(chan struct{})
 	conn.flowTable = make(map[string]tcpFlow)
-	conn.handles = []*pcap.Handle{handle}
+	conn.handles = []*afpacket.TPacket{handle}
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
-	conn.captureFlow(handle)
+	go conn.captureFlow(handle)
 
 	// iptables
 	err = conn.setTTL(tcpconn, 1)
@@ -480,15 +501,17 @@ func Listen(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	var handles []*pcap.Handle
+	var handles []*afpacket.TPacket
 	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all ifaces
 		for _, iface := range ifaces {
 			if addrs, err := iface.Addrs(); err == nil {
 				// build dst host
+				var hasIP bool
 				var dsthost = "("
 				for k, addr := range addrs {
 					if ipaddr, ok := addr.(*net.IPNet); ok {
 						dsthost += "dst host " + ipaddr.IP.String()
+						hasIP = true
 						if k != len(addrs)-1 {
 							dsthost += " or "
 						} else {
@@ -498,25 +521,22 @@ func Listen(network, address string) (*TCPConn, error) {
 				}
 
 				// try open on all nics
-				inactive, err := pcap.NewInactiveHandle(iface.Name)
-				if err != nil {
-					return nil, err
-				}
-				defer inactive.CleanUp()
-
-				inactive.SetSnapLen(2048)
-				inactive.SetImmediateMode(true)
-
-				if handle, err := inactive.Activate(); err == nil {
-					// apply filter
-					filter := fmt.Sprintf("tcp and %v and dst port %v", dsthost, laddr.Port)
-					if err := handle.SetBPFFilter(filter); err != nil {
+				if hasIP {
+					if handle, err := afpacket.NewTPacket(
+						afpacket.OptInterface(iface.Name),
+						afpacket.SocketRaw,
+						afpacket.TPacketVersion3); err == nil {
+						// TODO::apply filter
+						/*
+							filter := fmt.Sprintf("tcp and %v and dst port %v", dsthost, laddr.Port)
+							if err := handle.SetBPFFilter(filter); err != nil {
+								return nil, err
+							}
+						*/
+						handles = append(handles, handle)
+					} else {
 						return nil, err
 					}
-
-					handles = append(handles, handle)
-				} else {
-					return nil, err
 				}
 			}
 		}
@@ -537,26 +557,23 @@ func Listen(network, address string) (*TCPConn, error) {
 			return nil, errors.New("cannot find correct interface")
 		}
 
-		// pcap init
-		inactive, err := pcap.NewInactiveHandle(ifaceName)
+		// afpacket init
+		handle, err := afpacket.NewTPacket(
+			afpacket.OptInterface(ifaceName),
+			afpacket.SocketRaw,
+			afpacket.TPacketVersion3)
 		if err != nil {
 			return nil, err
 		}
-		defer inactive.CleanUp()
+		handles = []*afpacket.TPacket{handle}
 
-		inactive.SetSnapLen(2048)
-		inactive.SetImmediateMode(true)
-
-		if handle, err := inactive.Activate(); err == nil {
-			// apply filter
+		// TODO:apply filter
+		/*
 			filter := fmt.Sprintf("tcp and dst host %v and dst port %v", laddr.IP, laddr.Port)
 			if err := handle.SetBPFFilter(filter); err != nil {
 				return nil, err
 			}
-			handles = []*pcap.Handle{handle}
-		} else {
-			return nil, err
-		}
+		*/
 	}
 
 	// start listening
@@ -599,7 +616,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	}
 
 	for k := range handles {
-		conn.captureFlow(handles[k])
+		go conn.captureFlow(handles[k])
 	}
 
 	// discard everything in original connection
