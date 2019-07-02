@@ -363,16 +363,20 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// get iface name from the dummy connection, eg. eth0, lo0
-	ifaces, err := pcap.FindAllDevs()
+	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
 	}
 
 	var ifaceName string
 	for _, iface := range ifaces {
-		for _, addr := range iface.Addresses {
-			if addr.IP.Equal(dummy.LocalAddr().(*net.UDPAddr).IP) {
-				ifaceName = iface.Name
+		if addrs, err := iface.Addrs(); err == nil {
+			for _, addr := range addrs {
+				if ipaddr, ok := addr.(*net.IPNet); ok {
+					if ipaddr.IP.Equal(dummy.LocalAddr().(*net.UDPAddr).IP) {
+						ifaceName = iface.Name
+					}
+				}
 			}
 		}
 	}
@@ -471,7 +475,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	}
 
 	// get iface name from the dummy connection, eg. eth0, lo0
-	ifaces, err := pcap.FindAllDevs()
+	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
 	}
@@ -479,15 +483,17 @@ func Listen(network, address string) (*TCPConn, error) {
 	var handles []*pcap.Handle
 	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all ifaces
 		for _, iface := range ifaces {
-			if len(iface.Addresses) > 0 {
+			if addrs, err := iface.Addrs(); err == nil {
 				// build dst host
 				var dsthost = "("
-				for k := range iface.Addresses {
-					dsthost += "dst host " + iface.Addresses[k].IP.String()
-					if k != len(iface.Addresses)-1 {
-						dsthost += " or "
-					} else {
-						dsthost += ")"
+				for k, addr := range addrs {
+					if ipaddr, ok := addr.(*net.IPNet); ok {
+						dsthost += "dst host " + ipaddr.IP.String()
+						if k != len(addrs)-1 {
+							dsthost += " or "
+						} else {
+							dsthost += ")"
+						}
 					}
 				}
 
@@ -517,9 +523,13 @@ func Listen(network, address string) (*TCPConn, error) {
 	} else {
 		var ifaceName string
 		for _, iface := range ifaces {
-			for _, addr := range iface.Addresses {
-				if addr.IP.Equal(laddr.IP) {
-					ifaceName = iface.Name
+			if addrs, err := iface.Addrs(); err == nil {
+				for _, addr := range addrs {
+					if ipaddr, ok := addr.(*net.IPNet); ok {
+						if ipaddr.IP.Equal(laddr.IP) {
+							ifaceName = iface.Name
+						}
+					}
 				}
 			}
 		}
