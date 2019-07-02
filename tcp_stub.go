@@ -4,9 +4,10 @@ package tcpraw
 
 import (
 	"errors"
+	"net"
 )
 
-type TCPConn struct{}
+type TCPConn struct{ *net.UDPConn }
 
 // Dial connects to the remote TCP port,
 // and returns a single packet-oriented connection
