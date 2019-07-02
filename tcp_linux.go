@@ -17,6 +17,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/afpacket"
 	"github.com/google/gopacket/layers"
+	"golang.org/x/net/bpf"
 )
 
 var (
@@ -425,13 +426,30 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 	dummy.Close()
 
-	// TODO:apply filter for incoming data
-	/*
-		filter := fmt.Sprintf("tcp and dst host %v and dst port %v and src host %v and src port %v", laddr.IP, laddr.Port, raddr.IP, raddr.Port)
-		if err := handle.SetBPFFilter(filter); err != nil {
-			return nil, err
-		}
-	*/
+	// apply filter
+	filter := []bpf.RawInstruction{
+		{0x28, 0, 0, 0x0000000c},
+		{0x15, 0, 6, 0x000086dd},
+		{0x30, 0, 0, 0x00000014},
+		{0x15, 2, 0, 0x00000084},
+		{0x15, 1, 0, 0x00000006},
+		{0x15, 0, 13, 0x00000011},
+		{0x28, 0, 0, 0x00000038},
+		{0x15, 10, 11, uint32(laddr.Port)},
+		{0x15, 0, 10, 0x00000800},
+		{0x30, 0, 0, 0x00000017},
+		{0x15, 2, 0, 0x00000084},
+		{0x15, 1, 0, 0x00000006},
+		{0x15, 0, 6, 0x00000011},
+		{0x28, 0, 0, 0x00000014},
+		{0x45, 4, 0, 0x00001fff},
+		{0xb1, 0, 0, 0x0000000e},
+		{0x48, 0, 0, 0x00000010},
+		{0x15, 0, 1, uint32(laddr.Port)},
+		{0x6, 0, 0, 0x00040000},
+		{0x6, 0, 0, 0x00000000}}
+
+	handle.SetBPF(filter)
 
 	// create an established tcp connection
 	// will hack this tcp connection for packet transmission
@@ -526,14 +544,31 @@ func Listen(network, address string) (*TCPConn, error) {
 						afpacket.OptInterface(iface.Name),
 						afpacket.SocketRaw,
 						afpacket.TPacketVersion3); err == nil {
-						// TODO::apply filter
-						/*
-							filter := fmt.Sprintf("tcp and %v and dst port %v", dsthost, laddr.Port)
-							if err := handle.SetBPFFilter(filter); err != nil {
-								return nil, err
-							}
-						*/
 						handles = append(handles, handle)
+						// apply filter
+						filter := []bpf.RawInstruction{
+							{0x28, 0, 0, 0x0000000c},
+							{0x15, 0, 6, 0x000086dd},
+							{0x30, 0, 0, 0x00000014},
+							{0x15, 2, 0, 0x00000084},
+							{0x15, 1, 0, 0x00000006},
+							{0x15, 0, 13, 0x00000011},
+							{0x28, 0, 0, 0x00000038},
+							{0x15, 10, 11, uint32(laddr.Port)},
+							{0x15, 0, 10, 0x00000800},
+							{0x30, 0, 0, 0x00000017},
+							{0x15, 2, 0, 0x00000084},
+							{0x15, 1, 0, 0x00000006},
+							{0x15, 0, 6, 0x00000011},
+							{0x28, 0, 0, 0x00000014},
+							{0x45, 4, 0, 0x00001fff},
+							{0xb1, 0, 0, 0x0000000e},
+							{0x48, 0, 0, 0x00000010},
+							{0x15, 0, 1, uint32(laddr.Port)},
+							{0x6, 0, 0, 0x00040000},
+							{0x6, 0, 0, 0x00000000}}
+
+						handle.SetBPF(filter)
 					} else {
 						return nil, err
 					}
@@ -558,22 +593,38 @@ func Listen(network, address string) (*TCPConn, error) {
 		}
 
 		// afpacket init
-		handle, err := afpacket.NewTPacket(
+		if handle, err := afpacket.NewTPacket(
 			afpacket.OptInterface(ifaceName),
 			afpacket.SocketRaw,
-			afpacket.TPacketVersion3)
-		if err != nil {
+			afpacket.TPacketVersion3); err == nil {
+			// apply filter
+			filter := []bpf.RawInstruction{
+				{0x28, 0, 0, 0x0000000c},
+				{0x15, 0, 6, 0x000086dd},
+				{0x30, 0, 0, 0x00000014},
+				{0x15, 2, 0, 0x00000084},
+				{0x15, 1, 0, 0x00000006},
+				{0x15, 0, 13, 0x00000011},
+				{0x28, 0, 0, 0x00000038},
+				{0x15, 10, 11, uint32(laddr.Port)},
+				{0x15, 0, 10, 0x00000800},
+				{0x30, 0, 0, 0x00000017},
+				{0x15, 2, 0, 0x00000084},
+				{0x15, 1, 0, 0x00000006},
+				{0x15, 0, 6, 0x00000011},
+				{0x28, 0, 0, 0x00000014},
+				{0x45, 4, 0, 0x00001fff},
+				{0xb1, 0, 0, 0x0000000e},
+				{0x48, 0, 0, 0x00000010},
+				{0x15, 0, 1, uint32(laddr.Port)},
+				{0x6, 0, 0, 0x00040000},
+				{0x6, 0, 0, 0x00000000}}
+
+			handle.SetBPF(filter)
+			handles = []*afpacket.TPacket{handle}
+		} else {
 			return nil, err
 		}
-		handles = []*afpacket.TPacket{handle}
-
-		// TODO:apply filter
-		/*
-			filter := fmt.Sprintf("tcp and dst host %v and dst port %v", laddr.IP, laddr.Port)
-			if err := handle.SetBPFFilter(filter); err != nil {
-				return nil, err
-			}
-		*/
 	}
 
 	// start listening

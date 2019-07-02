@@ -185,4 +185,17 @@ func TestCompileBPF(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	filter = fmt.Sprintf("tcp and dst port 255")
+	if bpf, err := pcap.CompileBPFFilter(layers.LinkTypeIPv6, 1500, filter); err == nil {
+		log.Printf("ipv6: %v", bpf)
+	} else {
+		t.Fatal(err)
+	}
+
+	filter = fmt.Sprintf("tcp and dst port 255")
+	if bpf, err := pcap.CompileBPFFilter(layers.LinkTypeIPv4, 1500, filter); err == nil {
+		log.Printf("ipv4: %v", bpf)
+	} else {
+		t.Fatal(err)
+	}
 }
