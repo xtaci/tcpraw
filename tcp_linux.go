@@ -140,14 +140,19 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 		if err != nil {
 			return
 		}
+
+		// try decoding
 		packet := gopacket.NewPacket(data, layers.LinkTypeEthernet, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
-		transport := packet.TransportLayer().(*layers.TCP)
-		if transport == nil { // retry on loopback link layer
+		transport := packet.TransportLayer()
+		if transport == nil { // retry
 			packet = gopacket.NewPacket(data, layers.LinkTypeLoop, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
-			transport = packet.TransportLayer().(*layers.TCP)
+			transport = packet.TransportLayer()
+			if transport == nil {
+				continue
+			}
 		}
 
-		if transport != nil {
+		if transport, ok := packet.TransportLayer().(*layers.TCP); ok {
 			// build transient address
 			var addr net.TCPAddr
 			addr.Port = int(transport.SrcPort)
