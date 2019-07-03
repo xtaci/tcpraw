@@ -154,37 +154,43 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 
 		if transport, ok := packet.TransportLayer().(*layers.TCP); ok {
 			// build transient address
-			var addr net.TCPAddr
-			addr.Port = int(transport.SrcPort)
-			var toAddr net.TCPAddr
-			toAddr.Port = int(transport.DstPort)
+			var src net.TCPAddr
+			src.Port = int(transport.SrcPort)
+			var dst net.TCPAddr
+			dst.Port = int(transport.DstPort)
 
 			if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
 				network := layer.(*layers.IPv4)
-				addr.IP = network.SrcIP
-				toAddr.IP = network.DstIP
+				src.IP = network.SrcIP
+				dst.IP = network.DstIP
 			} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
 				network := layer.(*layers.IPv6)
-				addr.IP = network.SrcIP
-				toAddr.IP = network.DstIP
+				src.IP = network.SrcIP
+				dst.IP = network.DstIP
 			}
 
+			// compare IP and port, even though BPF has filtered
 			if conn.tcpconn != nil {
 				laddr := conn.tcpconn.RemoteAddr().(*net.TCPAddr)
-				if laddr.Port != addr.Port {
+				if laddr.Port != src.Port {
 					continue
 				}
-				if bytes.Compare(laddr.IP, addr.IP) != 0 {
+				if bytes.Compare(laddr.IP, src.IP) != 0 {
 					continue
 				}
 			} else {
 				laddr := conn.listener.Addr().(*net.TCPAddr)
-				if laddr.Port != toAddr.Port {
+				if laddr.Port != dst.Port {
 					continue
+				}
+				if laddr.IP != nil && !laddr.IP.IsUnspecified() {
+					if bytes.Compare(laddr.IP, dst.IP) != 0 {
+						continue
+					}
 				}
 			}
 
-			conn.lockflow(&addr, func(e *tcpFlow) {
+			conn.lockflow(&src, func(e *tcpFlow) {
 				e.ts = time.Now()
 				if transport.ACK {
 					e.seq = transport.Ack
@@ -245,7 +251,7 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 				payload := make([]byte, len(transport.Payload))
 				copy(payload, transport.Payload)
 				select {
-				case conn.chMessage <- message{payload, addr.String()}:
+				case conn.chMessage <- message{payload, src.String()}:
 				case <-conn.die:
 					return
 				}
