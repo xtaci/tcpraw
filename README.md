@@ -12,8 +12,6 @@
 
 # Introduction
 
-(VERY EARLY DEV STAGE)
-
 A packet-oriented connection by simulating tcp protocol
 
 ## Features
@@ -29,3 +27,8 @@ For complete documentation, see the associated [Godoc](https://godoc.org/github.
 ```
 sudo tcpdump -v -n -i lo0 ip and 'ip[8]>0' and tcp and port 3457
 ```
+
+
+## Status
+
+GA
