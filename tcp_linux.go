@@ -426,7 +426,7 @@ func Dial(network, address string) (*TCPConn, error) {
 		afpacket.OptInterface(ifaceName),
 		afpacket.OptNumBlocks(1),
 		afpacket.SocketRaw,
-		afpacket.TPacketVersion3)
+		afpacket.TPacketVersion2)
 	if err != nil {
 		return nil, err
 	}
@@ -556,7 +556,7 @@ func Listen(network, address string) (*TCPConn, error) {
 						afpacket.OptInterface(iface.Name),
 						afpacket.OptNumBlocks(1),
 						afpacket.SocketRaw,
-						afpacket.TPacketVersion3); err == nil {
+						afpacket.TPacketVersion2); err == nil {
 						handles = append(handles, handle)
 						// apply filter
 						filter := []bpf.RawInstruction{
@@ -610,7 +610,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			afpacket.OptInterface(ifaceName),
 			afpacket.OptNumBlocks(1),
 			afpacket.SocketRaw,
-			afpacket.TPacketVersion3); err == nil {
+			afpacket.TPacketVersion2); err == nil {
 			// apply filter
 			filter := []bpf.RawInstruction{
 				{0x28, 0, 0, 0x0000000c},
