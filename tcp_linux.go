@@ -425,6 +425,8 @@ func Dial(network, address string) (*TCPConn, error) {
 	handle, err := afpacket.NewTPacket(
 		afpacket.OptInterface(ifaceName),
 		afpacket.OptNumBlocks(1),
+		afpacket.OptBlockSize(65536),
+		afpacket.OptFrameSize(2048),
 		afpacket.SocketRaw,
 		afpacket.TPacketVersion2)
 	if err != nil {
@@ -555,6 +557,8 @@ func Listen(network, address string) (*TCPConn, error) {
 					if handle, err := afpacket.NewTPacket(
 						afpacket.OptInterface(iface.Name),
 						afpacket.OptNumBlocks(1),
+						afpacket.OptBlockSize(65536),
+						afpacket.OptFrameSize(2048),
 						afpacket.SocketRaw,
 						afpacket.TPacketVersion2); err == nil {
 						handles = append(handles, handle)
@@ -609,6 +613,8 @@ func Listen(network, address string) (*TCPConn, error) {
 		if handle, err := afpacket.NewTPacket(
 			afpacket.OptInterface(ifaceName),
 			afpacket.OptNumBlocks(1),
+			afpacket.OptBlockSize(65536),
+			afpacket.OptFrameSize(2048),
 			afpacket.SocketRaw,
 			afpacket.TPacketVersion2); err == nil {
 			// apply filter
