@@ -336,7 +336,7 @@ func (conn *TCPConn) writeToWithFlags(p []byte, addr net.Addr, SYN bool, PSH boo
 
 // properly close a connection
 func (conn *TCPConn) closeConn(c net.Conn) error {
-	key := c.LocalAddr().String()
+	key := c.RemoteAddr().String()
 	conn.flowsLock.Lock()
 	delete(conn.flowTable, key)
 	conn.flowsLock.Unlock()
