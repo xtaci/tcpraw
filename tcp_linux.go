@@ -274,10 +274,6 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 
 // WriteTo implements the PacketConn WriteTo method.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	return conn.writeToWithFlags(p, addr, false, true, true, false, false)
-}
-
-func (conn *TCPConn) writeToWithFlags(p []byte, addr net.Addr, SYN bool, PSH bool, ACK bool, FIN bool, RST bool) (n int, err error) {
 	var ready chan struct{}
 	conn.lockflow(addr, func(e *tcpFlow) { ready = e.ready })
 
@@ -312,11 +308,8 @@ func (conn *TCPConn) writeToWithFlags(p []byte, addr net.Addr, SYN bool, PSH boo
 			Window:  12580,
 			Ack:     flow.ack,
 			Seq:     flow.seq,
-			SYN:     SYN,
-			PSH:     PSH,
-			ACK:     ACK,
-			FIN:     FIN,
-			RST:     RST,
+			PSH:     true,
+			ACK:     true,
 		}
 
 		tcp.SetNetworkLayerForChecksum(flow.networkLayer.(gopacket.NetworkLayer))
