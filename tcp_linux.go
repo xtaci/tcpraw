@@ -511,10 +511,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// discards data flow on tcp conn
-	go func() {
-		io.Copy(ioutil.Discard, tcpconn)
-		tcpconn.Close()
-	}()
+	go io.Copy(ioutil.Discard, tcpconn)
 
 	return conn, nil
 }
@@ -702,10 +699,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			conn.osConnsLock.Lock()
 			conn.osConns[tcpconn.LocalAddr().String()] = tcpconn
 			conn.osConnsLock.Unlock()
-			go func() {
-				io.Copy(ioutil.Discard, tcpconn)
-				tcpconn.Close()
-			}()
+			go io.Copy(ioutil.Discard, tcpconn)
 		}
 	}()
 
