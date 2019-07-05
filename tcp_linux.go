@@ -22,7 +22,7 @@ import (
 
 var (
 	errOpNotImplemented = errors.New("operation not implemented")
-	expire              = 30 * time.Minute
+	expire              = time.Minute
 )
 
 type message struct {
