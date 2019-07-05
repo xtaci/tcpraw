@@ -334,20 +334,29 @@ func (conn *TCPConn) writeToWithFlags(p []byte, addr net.Addr, SYN bool, PSH boo
 	}
 }
 
+// properly close a connection
+func (conn *TCPConn) closeConn(c net.Conn) error {
+	key := c.LocalAddr().String()
+	conn.flowsLock.Lock()
+	delete(conn.flowTable, key)
+	conn.flowsLock.Unlock()
+
+	conn.setTTL(c, 64)
+	return c.Close()
+}
+
 // Close closes the connection.
 func (conn *TCPConn) Close() error {
 	var err error
 	conn.dieOnce.Do(func() {
 		// close all established tcp connections
 		if conn.tcpconn != nil {
-			conn.setTTL(conn.tcpconn, 64)
-			err = conn.tcpconn.Close()
+			err = conn.closeConn(conn.tcpconn)
 		} else if conn.listener != nil {
 			err = conn.listener.Close() // close listener
 			conn.osConnsLock.Lock()
 			for _, tcpconn := range conn.osConns { // close all accepted conns
-				conn.setTTL(tcpconn, 64)
-				tcpconn.Close()
+				conn.closeConn(tcpconn)
 			}
 			conn.osConns = nil
 			conn.osConnsLock.Unlock()
@@ -511,7 +520,10 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// discards data flow on tcp conn
-	go io.Copy(ioutil.Discard, tcpconn)
+	go func() {
+		io.Copy(ioutil.Discard, tcpconn)
+		conn.closeConn(tcpconn)
+	}()
 
 	return conn, nil
 }
@@ -699,7 +711,10 @@ func Listen(network, address string) (*TCPConn, error) {
 			conn.osConnsLock.Lock()
 			conn.osConns[tcpconn.LocalAddr().String()] = tcpconn
 			conn.osConnsLock.Unlock()
-			go io.Copy(ioutil.Discard, tcpconn)
+			go func() {
+				io.Copy(ioutil.Discard, tcpconn)
+				conn.closeConn(tcpconn)
+			}()
 		}
 	}()
 
