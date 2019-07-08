@@ -31,6 +31,7 @@ type message struct {
 
 // tcp flow information for a connection pair
 type tcpFlow struct {
+	conn         net.Conn          // system os conn
 	handle       *afpacket.TPacket // used in WriteTo to WritePacketData
 	ready        chan struct{}     // mark whether the flow is ready to WriteTo
 	seq          uint32
@@ -48,9 +49,6 @@ type TCPConn struct {
 	// the original connection
 	tcpconn  *net.TCPConn
 	listener *net.TCPListener
-	// connections accepted from listener
-	osConns     map[string]net.Conn
-	osConnsLock sync.Mutex
 
 	// gopacket
 	handles   []*afpacket.TPacket
@@ -89,47 +87,30 @@ func (conn *TCPConn) cleaner() {
 	case <-conn.die:
 		return
 	case <-ticker.C:
-		var raddrs []string
 		conn.flowsLock.Lock()
 		for k, v := range conn.flowTable {
 			if time.Now().Sub(v.ts) > expire {
+				if v.conn != nil {
+					conn.setTTL(v.conn.(*net.TCPConn), 64)
+					v.conn.Close()
+				}
 				delete(conn.flowTable, k)
-				raddrs = append(raddrs, k)
 			}
 		}
 		conn.flowsLock.Unlock()
-
-		// close all timeout osConns
-		conn.osConnsLock.Lock()
-		for _, v := range raddrs {
-			if c, ok := conn.osConns[v]; ok {
-				conn.setTTL(c, 64)
-				c.Close()
-				delete(conn.osConns, v)
-			}
-		}
-		conn.osConnsLock.Unlock()
 	}
 }
 
 // setTTL sets the Time-To-Live field on a given connection
-func (conn *TCPConn) setTTL(x interface{}, ttl int) (err error) {
+func (conn *TCPConn) setTTL(c *net.TCPConn, ttl int) (err error) {
 	var raw syscall.RawConn
 	var addr *net.TCPAddr
 
-	if l, ok := x.(*net.TCPListener); ok {
-		raw, err = l.SyscallConn()
-		if err != nil {
-			return err
-		}
-		addr = l.Addr().(*net.TCPAddr)
-	} else if c, ok := x.(*net.TCPConn); ok {
-		raw, err = c.SyscallConn()
-		if err != nil {
-			return err
-		}
-		addr = c.LocalAddr().(*net.TCPAddr)
+	raw, err = c.SyscallConn()
+	if err != nil {
+		return err
 	}
+	addr = c.LocalAddr().(*net.TCPAddr)
 
 	if addr.IP.To4() == nil {
 		raw.Control(func(fd uintptr) {
@@ -340,14 +321,14 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	}
 }
 
-// properly close a connection
+// passively close a connection
 func (conn *TCPConn) closeConn(c net.Conn) error {
 	key := c.RemoteAddr().String()
 	conn.flowsLock.Lock()
 	delete(conn.flowTable, key)
 	conn.flowsLock.Unlock()
 
-	conn.setTTL(c, 64)
+	conn.setTTL(c.(*net.TCPConn), 64)
 	return c.Close()
 }
 
@@ -360,12 +341,14 @@ func (conn *TCPConn) Close() error {
 			err = conn.closeConn(conn.tcpconn)
 		} else if conn.listener != nil {
 			err = conn.listener.Close() // close listener
-			conn.osConnsLock.Lock()
-			for _, tcpconn := range conn.osConns { // close all accepted conns
-				conn.closeConn(tcpconn)
+			conn.flowsLock.Lock()
+			for _, v := range conn.flowTable {
+				if v.conn != nil {
+					v.conn.Close()
+				}
 			}
-			conn.osConns = nil
-			conn.osConnsLock.Unlock()
+			conn.flowTable = nil
+			conn.flowsLock.Unlock()
 		}
 
 		// delete iptable
@@ -522,6 +505,11 @@ func Dial(network, address string) (*TCPConn, error) {
 		}
 	}
 
+	// record net.Conn
+	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) {
+		e.conn = tcpconn
+	})
+
 	// discards data flow on tcp conn
 	go func() {
 		io.Copy(ioutil.Discard, tcpconn)
@@ -651,7 +639,6 @@ func Listen(network, address string) (*TCPConn, error) {
 
 	// fields
 	conn := new(TCPConn)
-	conn.osConns = make(map[string]net.Conn)
 	conn.handles = handles
 	conn.flowTable = make(map[string]tcpFlow)
 	conn.die = make(chan struct{})
@@ -692,7 +679,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	// discard everything in original connection
 	go func() {
 		for {
-			tcpconn, err := l.Accept()
+			tcpconn, err := l.AcceptTCP()
 			if err != nil {
 				return
 			}
@@ -701,9 +688,12 @@ func Listen(network, address string) (*TCPConn, error) {
 			if err := conn.setTTL(tcpconn, 1); err != nil {
 				panic(err)
 			}
-			conn.osConnsLock.Lock()
-			conn.osConns[tcpconn.RemoteAddr().String()] = tcpconn
-			conn.osConnsLock.Unlock()
+
+			// record net.Conn
+			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) {
+				e.conn = tcpconn
+			})
+
 			go func() {
 				io.Copy(ioutil.Discard, tcpconn)
 				conn.closeConn(tcpconn)
