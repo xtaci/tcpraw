@@ -89,13 +89,26 @@ func (conn *TCPConn) cleaner() {
 	case <-conn.die:
 		return
 	case <-ticker.C:
+		var raddrs []string
 		conn.flowsLock.Lock()
 		for k, v := range conn.flowTable {
 			if time.Now().Sub(v.ts) > expire {
 				delete(conn.flowTable, k)
+				raddrs = append(raddrs, k)
 			}
 		}
 		conn.flowsLock.Unlock()
+
+		// close all timeout osConns
+		conn.osConnsLock.Lock()
+		for _, v := range raddrs {
+			if c, ok := conn.osConns[v]; ok {
+				conn.setTTL(c, 64)
+				c.Close()
+				delete(conn.osConns, v)
+			}
+		}
+		conn.osConnsLock.Unlock()
 	}
 }
 
@@ -645,7 +658,9 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn.chMessage = make(chan message)
 	conn.listener = l
 
-	// iptables
+	// iptables drop packets marked with TTL = 1
+	// TODO: what if iptables is not available, the next hop will send back ICMP Time Exceeded,
+	// is this still an acceptable behavior?
 	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
 		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
 		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
@@ -669,6 +684,7 @@ func Listen(network, address string) (*TCPConn, error) {
 		}
 	}
 
+	// start capturing
 	for k := range handles {
 		go conn.captureFlow(handles[k])
 	}
@@ -681,9 +697,12 @@ func Listen(network, address string) (*TCPConn, error) {
 				return
 			}
 
-			conn.setTTL(tcpconn, 1)
+			// if we cannot set TTL = 1, the only thing reasonable is panic
+			if err := conn.setTTL(tcpconn, 1); err != nil {
+				panic(err)
+			}
 			conn.osConnsLock.Lock()
-			conn.osConns[tcpconn.LocalAddr().String()] = tcpconn
+			conn.osConns[tcpconn.RemoteAddr().String()] = tcpconn
 			conn.osConnsLock.Unlock()
 			go func() {
 				io.Copy(ioutil.Discard, tcpconn)
