@@ -3,7 +3,6 @@
 package tcpraw
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -171,20 +170,21 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 
 			// compare IP and port, even though BPF has filtered
 			if conn.tcpconn != nil {
-				laddr := conn.tcpconn.RemoteAddr().(*net.TCPAddr)
-				if laddr.Port != src.Port {
+				raddr := conn.tcpconn.RemoteAddr().(*net.TCPAddr)
+				if raddr.Port != src.Port { // from server
 					continue
 				}
-				if bytes.Compare(laddr.IP, src.IP) != 0 {
+
+				if !raddr.IP.Equal(src.IP) {
 					continue
 				}
 			} else {
 				laddr := conn.listener.Addr().(*net.TCPAddr)
-				if laddr.Port != dst.Port {
+				if laddr.Port != dst.Port { // to server
 					continue
 				}
 				if laddr.IP != nil && !laddr.IP.IsUnspecified() {
-					if bytes.Compare(laddr.IP, dst.IP) != 0 {
+					if !laddr.IP.Equal(dst.IP) {
 						continue
 					}
 				}
@@ -443,20 +443,17 @@ func Dial(network, address string) (*TCPConn, error) {
 	dummy.Close()
 
 	// apply filter
+	// tcpdump -dd tcp and dst port 255
 	filter := []bpf.RawInstruction{
 		{0x28, 0, 0, 0x0000000c},
-		{0x15, 0, 6, 0x000086dd},
+		{0x15, 0, 4, 0x000086dd},
 		{0x30, 0, 0, 0x00000014},
-		{0x15, 2, 0, 0x00000084},
-		{0x15, 1, 0, 0x00000006},
-		{0x15, 0, 13, 0x00000011},
+		{0x15, 0, 11, 0x00000006},
 		{0x28, 0, 0, 0x00000038},
-		{0x15, 10, 11, uint32(laddr.Port)},
-		{0x15, 0, 10, 0x00000800},
+		{0x15, 8, 9, uint32(laddr.Port)},
+		{0x15, 0, 8, 0x00000800},
 		{0x30, 0, 0, 0x00000017},
-		{0x15, 2, 0, 0x00000084},
-		{0x15, 1, 0, 0x00000006},
-		{0x15, 0, 6, 0x00000011},
+		{0x15, 0, 6, 0x00000006},
 		{0x28, 0, 0, 0x00000014},
 		{0x45, 4, 0, 0x00001fff},
 		{0xb1, 0, 0, 0x0000000e},
@@ -529,7 +526,6 @@ func Listen(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// get iface name from the dummy connection, eg. eth0, lo0
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
@@ -560,18 +556,14 @@ func Listen(network, address string) (*TCPConn, error) {
 						// apply filter
 						filter := []bpf.RawInstruction{
 							{0x28, 0, 0, 0x0000000c},
-							{0x15, 0, 6, 0x000086dd},
+							{0x15, 0, 4, 0x000086dd},
 							{0x30, 0, 0, 0x00000014},
-							{0x15, 2, 0, 0x00000084},
-							{0x15, 1, 0, 0x00000006},
-							{0x15, 0, 13, 0x00000011},
+							{0x15, 0, 11, 0x00000006},
 							{0x28, 0, 0, 0x00000038},
-							{0x15, 10, 11, uint32(laddr.Port)},
-							{0x15, 0, 10, 0x00000800},
+							{0x15, 8, 9, uint32(laddr.Port)},
+							{0x15, 0, 8, 0x00000800},
 							{0x30, 0, 0, 0x00000017},
-							{0x15, 2, 0, 0x00000084},
-							{0x15, 1, 0, 0x00000006},
-							{0x15, 0, 6, 0x00000011},
+							{0x15, 0, 6, 0x00000006},
 							{0x28, 0, 0, 0x00000014},
 							{0x45, 4, 0, 0x00001fff},
 							{0xb1, 0, 0, 0x0000000e},
@@ -615,18 +607,14 @@ func Listen(network, address string) (*TCPConn, error) {
 			// apply filter
 			filter := []bpf.RawInstruction{
 				{0x28, 0, 0, 0x0000000c},
-				{0x15, 0, 6, 0x000086dd},
+				{0x15, 0, 4, 0x000086dd},
 				{0x30, 0, 0, 0x00000014},
-				{0x15, 2, 0, 0x00000084},
-				{0x15, 1, 0, 0x00000006},
-				{0x15, 0, 13, 0x00000011},
+				{0x15, 0, 11, 0x00000006},
 				{0x28, 0, 0, 0x00000038},
-				{0x15, 10, 11, uint32(laddr.Port)},
-				{0x15, 0, 10, 0x00000800},
+				{0x15, 8, 9, uint32(laddr.Port)},
+				{0x15, 0, 8, 0x00000800},
 				{0x30, 0, 0, 0x00000017},
-				{0x15, 2, 0, 0x00000084},
-				{0x15, 1, 0, 0x00000006},
-				{0x15, 0, 6, 0x00000011},
+				{0x15, 0, 6, 0x00000006},
 				{0x28, 0, 0, 0x00000014},
 				{0x45, 4, 0, 0x00001fff},
 				{0xb1, 0, 0, 0x0000000e},
