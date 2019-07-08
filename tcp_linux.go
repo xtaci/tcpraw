@@ -539,18 +539,11 @@ func Listen(network, address string) (*TCPConn, error) {
 	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all ifaces
 		for _, iface := range ifaces {
 			if addrs, err := iface.Addrs(); err == nil {
-				// build dst host
 				var hasIP bool
-				var dsthost = "("
-				for k, addr := range addrs {
-					if ipaddr, ok := addr.(*net.IPNet); ok {
-						dsthost += "dst host " + ipaddr.IP.String()
+				for _, addr := range addrs {
+					if _, ok := addr.(*net.IPNet); ok {
 						hasIP = true
-						if k != len(addrs)-1 {
-							dsthost += " or "
-						} else {
-							dsthost += ")"
-						}
+						break
 					}
 				}
 
