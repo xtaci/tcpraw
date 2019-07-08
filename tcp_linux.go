@@ -24,6 +24,7 @@ var (
 	expire              = time.Minute
 )
 
+// a message from NIC
 type message struct {
 	bts  []byte
 	addr string
@@ -31,14 +32,14 @@ type message struct {
 
 // tcp flow information for a connection pair
 type tcpFlow struct {
-	conn         net.Conn          // system os conn
-	handle       *afpacket.TPacket // used in WriteTo to WritePacketData
-	ready        chan struct{}     // mark whether the flow is ready to WriteTo
-	seq          uint32
-	ack          uint32
+	conn         *net.TCPConn               // the system TCP connection
+	handle       *afpacket.TPacket          // used in WriteTo to WritePacketData
+	ready        chan struct{}              // mark whether this flow is ready to WriteTo
+	seq          uint32                     // TCP sequence number
+	ack          uint32                     // TCP ack number
 	linkLayer    gopacket.SerializableLayer // link layer header
 	networkLayer gopacket.SerializableLayer // network layer header
-	ts           time.Time                  // last packet incoming
+	ts           time.Time                  // last packet incoming time
 }
 
 // TCPConn defines a TCP-packet oriented connection
@@ -46,15 +47,16 @@ type TCPConn struct {
 	die     chan struct{}
 	dieOnce sync.Once
 
-	// the original connection
-	tcpconn  *net.TCPConn
-	listener *net.TCPListener
+	// the main golang sockets
+	tcpconn  *net.TCPConn     // from net.Dial
+	listener *net.TCPListener // from net.Listen
 
-	// gopacket
-	handles   []*afpacket.TPacket
-	chMessage chan message // incoming packets channel
+	// all handles for capturing on all needed NICs
+	handles []*afpacket.TPacket
+	// packets captures from all needed NICs will deliver to this channel
+	chMessage chan message
 
-	// important TCP header information
+	// all TCP flows
 	flowTable map[string]tcpFlow
 	flowsLock sync.Mutex
 
@@ -91,7 +93,7 @@ func (conn *TCPConn) cleaner() {
 		for k, v := range conn.flowTable {
 			if time.Now().Sub(v.ts) > expire {
 				if v.conn != nil {
-					conn.setTTL(v.conn.(*net.TCPConn), 64)
+					conn.setTTL(v.conn, 64)
 					v.conn.Close()
 				}
 				delete(conn.flowTable, k)
@@ -124,7 +126,7 @@ func (conn *TCPConn) setTTL(c *net.TCPConn, ttl int) (err error) {
 	return
 }
 
-// captureFlow capture each packets inbound based on rules of BPF
+// captureFlow capture every packets inbound based on rules of BPF
 func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 	defer handle.Close()
 
@@ -337,14 +339,15 @@ func (conn *TCPConn) Close() error {
 	var err error
 	conn.dieOnce.Do(func() {
 		// close all established tcp connections
-		if conn.tcpconn != nil {
-			err = conn.closeConn(conn.tcpconn)
+		if conn.tcpconn != nil { // client
+			conn.setTTL(conn.tcpconn, 64)
+			err = conn.tcpconn.Close()
 		} else if conn.listener != nil {
-			err = conn.listener.Close() // close listener
+			err = conn.listener.Close() // server
 			conn.flowsLock.Lock()
 			for _, v := range conn.flowTable {
 				if v.conn != nil {
-					conn.setTTL(v.conn.(*net.TCPConn), 64)
+					conn.setTTL(v.conn, 64)
 					v.conn.Close()
 				}
 			}
