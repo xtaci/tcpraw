@@ -32,7 +32,7 @@ type message struct {
 
 // tcp flow information for a connection pair
 type tcpFlow struct {
-	ready        chan struct{}              // mark whether this flow is ready to WriteTo
+	writeReady   chan struct{}              // mark whether this flow is ready to WriteTo
 	conn         *net.TCPConn               // the system TCP connection of this flow
 	handle       *afpacket.TPacket          // the handle to send packets
 	seq          uint32                     // TCP sequence number
@@ -74,7 +74,7 @@ func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	conn.flowsLock.Lock()
 	e, ok := conn.flowTable[key]
 	if !ok { // entry first visit
-		e.ready = make(chan struct{})
+		e.writeReady = make(chan struct{})
 		e.ts = time.Now()
 	}
 	f(&e)
@@ -172,7 +172,7 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 				if transport.SYN { // for SYN packets, try initialize the flow entry once
 					e.ack = transport.Seq + 1
 					select {
-					case <-e.ready:
+					case <-e.writeReady:
 					default:
 						e.handle = handle
 
@@ -213,7 +213,7 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 
 						// this tcp flow is ready to operate based on flow information
 						if e.linkLayer != nil && e.networkLayer != nil {
-							close(e.ready)
+							close(e.writeReady)
 						}
 					}
 				} else if transport.PSH {
@@ -249,7 +249,7 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 // WriteTo implements the PacketConn WriteTo method.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	var ready chan struct{}
-	conn.lockflow(addr, func(e *tcpFlow) { ready = e.ready })
+	conn.lockflow(addr, func(e *tcpFlow) { ready = e.writeReady })
 
 	select {
 	case <-conn.die:
