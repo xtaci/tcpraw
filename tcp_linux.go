@@ -163,6 +163,7 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 				}
 			}
 
+			// to keep track of TCP header
 			conn.lockflow(&src, func(e *tcpFlow) {
 				e.ts = time.Now()
 				if transport.ACK {
