@@ -344,6 +344,7 @@ func (conn *TCPConn) Close() error {
 			conn.flowsLock.Lock()
 			for _, v := range conn.flowTable {
 				if v.conn != nil {
+					conn.setTTL(v.conn.(*net.TCPConn), 64)
 					v.conn.Close()
 				}
 			}
