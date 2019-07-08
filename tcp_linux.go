@@ -113,6 +113,13 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 			return
 		}
 
+		// if packets keep on flowing on this NIC, this goroutine will return
+		select {
+		case <-conn.die:
+			return
+		default:
+		}
+
 		// try decoding
 		packet := gopacket.NewPacket(data, layers.LinkTypeEthernet, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
 		transport := packet.TransportLayer()
@@ -221,6 +228,7 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 				}
 			})
 
+			// deliver push data
 			if transport.PSH {
 				payload := make([]byte, len(transport.Payload))
 				copy(payload, transport.Payload)
