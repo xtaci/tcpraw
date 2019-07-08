@@ -32,9 +32,9 @@ type message struct {
 
 // tcp flow information for a connection pair
 type tcpFlow struct {
-	conn         *net.TCPConn               // the system TCP connection
-	handle       *afpacket.TPacket          // used in WriteTo to WritePacketData
 	ready        chan struct{}              // mark whether this flow is ready to WriteTo
+	conn         *net.TCPConn               // the system TCP connection of this flow
+	handle       *afpacket.TPacket          // the handle to send packets
 	seq          uint32                     // TCP sequence number
 	ack          uint32                     // TCP ack number
 	linkLayer    gopacket.SerializableLayer // link layer header
@@ -51,9 +51,9 @@ type TCPConn struct {
 	tcpconn  *net.TCPConn     // from net.Dial
 	listener *net.TCPListener // from net.Listen
 
-	// all handles for capturing on all needed NICs
+	// all handles for capturing on all related NICs
 	handles []*afpacket.TPacket
-	// packets captures from all needed NICs will deliver to this channel
+	// packets captures from all related NICs will deliver to this channel
 	chMessage chan message
 
 	// all TCP flows
@@ -82,7 +82,7 @@ func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	conn.flowsLock.Unlock()
 }
 
-// clean expired conns for listener
+// clean expired connections
 func (conn *TCPConn) cleaner() {
 	ticker := time.NewTicker(time.Minute)
 	select {
@@ -93,7 +93,7 @@ func (conn *TCPConn) cleaner() {
 		for k, v := range conn.flowTable {
 			if time.Now().Sub(v.ts) > expire {
 				if v.conn != nil {
-					conn.setTTL(v.conn, 64)
+					setTTL(v.conn, 64)
 					v.conn.Close()
 				}
 				delete(conn.flowTable, k)
@@ -101,29 +101,6 @@ func (conn *TCPConn) cleaner() {
 		}
 		conn.flowsLock.Unlock()
 	}
-}
-
-// setTTL sets the Time-To-Live field on a given connection
-func (conn *TCPConn) setTTL(c *net.TCPConn, ttl int) (err error) {
-	var raw syscall.RawConn
-	var addr *net.TCPAddr
-
-	raw, err = c.SyscallConn()
-	if err != nil {
-		return err
-	}
-	addr = c.LocalAddr().(*net.TCPAddr)
-
-	if addr.IP.To4() == nil {
-		raw.Control(func(fd uintptr) {
-			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
-		})
-	} else {
-		raw.Control(func(fd uintptr) {
-			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
-		})
-	}
-	return
 }
 
 // captureFlow capture every packets inbound based on rules of BPF
@@ -323,35 +300,27 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	}
 }
 
-// passively close a connection
-func (conn *TCPConn) closeConn(c net.Conn) error {
-	key := c.RemoteAddr().String()
-	conn.flowsLock.Lock()
-	delete(conn.flowTable, key)
-	conn.flowsLock.Unlock()
-
-	conn.setTTL(c.(*net.TCPConn), 64)
-	return c.Close()
-}
-
 // Close closes the connection.
 func (conn *TCPConn) Close() error {
 	var err error
 	conn.dieOnce.Do(func() {
+		// signal closing
+		close(conn.die)
+
 		// close all established tcp connections
 		if conn.tcpconn != nil { // client
-			conn.setTTL(conn.tcpconn, 64)
+			setTTL(conn.tcpconn, 64)
 			err = conn.tcpconn.Close()
 		} else if conn.listener != nil {
 			err = conn.listener.Close() // server
 			conn.flowsLock.Lock()
-			for _, v := range conn.flowTable {
+			for k, v := range conn.flowTable {
 				if v.conn != nil {
-					conn.setTTL(v.conn, 64)
+					setTTL(v.conn, 64)
 					v.conn.Close()
 				}
+				delete(conn.flowTable, k)
 			}
-			conn.flowTable = nil
 			conn.flowsLock.Unlock()
 		}
 
@@ -362,7 +331,6 @@ func (conn *TCPConn) Close() error {
 		if conn.ip6tables != nil {
 			conn.ip6tables.Delete("filter", "OUTPUT", conn.ip6rule...)
 		}
-
 	})
 	return err
 }
@@ -480,8 +448,13 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.chMessage = make(chan message)
 	go conn.captureFlow(handle)
 
+	// record this flow
+	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) {
+		e.conn = tcpconn
+	})
+
 	// iptables
-	err = conn.setTTL(tcpconn, 1)
+	err = setTTL(tcpconn, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -509,16 +482,8 @@ func Dial(network, address string) (*TCPConn, error) {
 		}
 	}
 
-	// record net.Conn
-	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) {
-		e.conn = tcpconn
-	})
-
 	// discards data flow on tcp conn
-	go func() {
-		io.Copy(ioutil.Discard, tcpconn)
-		conn.closeConn(tcpconn)
-	}()
+	go io.Copy(ioutil.Discard, tcpconn)
 
 	return conn, nil
 }
@@ -689,7 +654,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			}
 
 			// if we cannot set TTL = 1, the only thing reasonable is panic
-			if err := conn.setTTL(tcpconn, 1); err != nil {
+			if err := setTTL(tcpconn, 1); err != nil {
 				panic(err)
 			}
 
@@ -698,12 +663,32 @@ func Listen(network, address string) (*TCPConn, error) {
 				e.conn = tcpconn
 			})
 
-			go func() {
-				io.Copy(ioutil.Discard, tcpconn)
-				conn.closeConn(tcpconn)
-			}()
+			go io.Copy(ioutil.Discard, tcpconn)
 		}
 	}()
 
 	return conn, nil
+}
+
+// setTTL sets the Time-To-Live field on a given connection
+func setTTL(c *net.TCPConn, ttl int) (err error) {
+	var raw syscall.RawConn
+	var addr *net.TCPAddr
+
+	raw, err = c.SyscallConn()
+	if err != nil {
+		return err
+	}
+	addr = c.LocalAddr().(*net.TCPAddr)
+
+	if addr.IP.To4() == nil {
+		raw.Control(func(fd uintptr) {
+			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
+		})
+	} else {
+		raw.Control(func(fd uintptr) {
+			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
+		})
+	}
+	return
 }
