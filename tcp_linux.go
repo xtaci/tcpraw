@@ -181,58 +181,60 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 		// to keep track of TCP header
 		conn.lockflow(&src, func(e *tcpFlow) {
 			e.ts = time.Now()
+
 			if tcp.ACK {
 				e.seq = tcp.Ack
 			}
-			if tcp.SYN { // for SYN packets, try initialize the flow entry once
+			if tcp.PSH {
+				e.ack = tcp.Seq + uint32(len(tcp.Payload))
+			}
+			if tcp.SYN { // for SYN packets, try initializing the flow entry once
 				e.ack = tcp.Seq + 1
-				select {
-				case <-e.writeReady:
-				default:
-					e.handle = handle
+			}
 
-					// create link layer for WriteTo
-					if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
-						ethLayer := layer.(*layers.Ethernet)
-						e.linkLayer = &layers.Ethernet{
-							EthernetType: ethLayer.EthernetType,
-							SrcMAC:       ethLayer.DstMAC,
-							DstMAC:       ethLayer.SrcMAC,
-						}
-					} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
-						loopLayer := layer.(*layers.Loopback)
-						e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
+			select {
+			case <-e.writeReady:
+			default:
+				e.handle = handle
+				// create link layer for WriteTo
+				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
+					ethLayer := layer.(*layers.Ethernet)
+					e.linkLayer = &layers.Ethernet{
+						EthernetType: ethLayer.EthernetType,
+						SrcMAC:       ethLayer.DstMAC,
+						DstMAC:       ethLayer.SrcMAC,
 					}
+				} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
+					loopLayer := layer.(*layers.Loopback)
+					e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
+				}
 
-					// create network layer for WriteTo
-					if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-						network := layer.(*layers.IPv4)
-						e.networkLayer = &layers.IPv4{
-							SrcIP:    network.DstIP,
-							DstIP:    network.SrcIP,
-							Protocol: network.Protocol,
-							Version:  network.Version,
-							Flags:    layers.IPv4DontFragment,
-							TTL:      64,
-						}
-					} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
-						network := layer.(*layers.IPv6)
-						e.networkLayer = &layers.IPv6{
-							Version:    network.Version,
-							NextHeader: network.NextHeader,
-							SrcIP:      network.DstIP,
-							DstIP:      network.SrcIP,
-							HopLimit:   64,
-						}
+				// create network layer for WriteTo
+				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
+					network := layer.(*layers.IPv4)
+					e.networkLayer = &layers.IPv4{
+						SrcIP:    network.DstIP,
+						DstIP:    network.SrcIP,
+						Protocol: network.Protocol,
+						Version:  network.Version,
+						Flags:    layers.IPv4DontFragment,
+						TTL:      64,
 					}
-
-					// this tcp flow is ready to operate based on flow information
-					if e.linkLayer != nil && e.networkLayer != nil {
-						close(e.writeReady)
+				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
+					network := layer.(*layers.IPv6)
+					e.networkLayer = &layers.IPv6{
+						Version:    network.Version,
+						NextHeader: network.NextHeader,
+						SrcIP:      network.DstIP,
+						DstIP:      network.SrcIP,
+						HopLimit:   64,
 					}
 				}
-			} else if tcp.PSH {
-				e.ack += uint32(len(tcp.Payload))
+
+				// this tcp flow is ready to operate based on flow information
+				if e.linkLayer != nil && e.networkLayer != nil {
+					close(e.writeReady)
+				}
 			}
 		})
 
