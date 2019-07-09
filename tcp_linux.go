@@ -159,11 +159,16 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 		// compare IP and port, even though BPF has filtered some
 		if conn.tcpconn != nil {
 			raddr := conn.tcpconn.RemoteAddr().(*net.TCPAddr)
-			if raddr.Port != src.Port { // from server
-				continue
-			}
+			laddr := conn.tcpconn.LocalAddr().(*net.TCPAddr)
 
-			if !raddr.IP.Equal(src.IP) {
+			// 4-tuples
+			if raddr.Port != src.Port {
+				continue
+			} else if laddr.Port != dst.Port {
+				continue
+			} else if !raddr.IP.Equal(src.IP) {
+				continue
+			} else if !laddr.IP.Equal(dst.IP) {
 				continue
 			}
 		} else {
