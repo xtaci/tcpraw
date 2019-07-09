@@ -30,15 +30,15 @@ type message struct {
 	addr string
 }
 
-// tcp flow information for a connection pair
+// a tcp flow information of a connection pair
 type tcpFlow struct {
 	writeReady   chan struct{}              // mark whether this flow is ready to WriteTo
-	conn         *net.TCPConn               // the system TCP connection of this flow
+	conn         *net.TCPConn               // the related system TCP connection of this flow
 	handle       *afpacket.TPacket          // the handle to send packets
 	seq          uint32                     // TCP sequence number
-	ack          uint32                     // TCP ack number
-	linkLayer    gopacket.SerializableLayer // link layer header
-	networkLayer gopacket.SerializableLayer // network layer header
+	ack          uint32                     // TCP acknowledge number
+	linkLayer    gopacket.SerializableLayer // link layer header for tx
+	networkLayer gopacket.SerializableLayer // network layer header for tx
 	ts           time.Time                  // last packet incoming time
 }
 
@@ -53,7 +53,7 @@ type TCPConn struct {
 
 	// all handles for capturing on all related NICs
 	handles []*afpacket.TPacket
-	// packets captures from all related NICs will deliver to this channel
+	// packets captured from all related NICs will be delivered to this channel
 	chMessage chan message
 
 	// all TCP flows
