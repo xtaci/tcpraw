@@ -133,17 +133,17 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 			}
 		}
 
-		// try fetching TCP frame
-		transport, ok := packet.TransportLayer().(*layers.TCP)
+		// try casting to TCP frame
+		tcp, ok := transport.(*layers.TCP)
 		if !ok {
 			continue
 		}
 
 		// build transient address
 		var src net.TCPAddr
-		src.Port = int(transport.SrcPort)
+		src.Port = int(tcp.SrcPort)
 		var dst net.TCPAddr
-		dst.Port = int(transport.DstPort)
+		dst.Port = int(tcp.DstPort)
 
 		// try IPv4 and IPv6
 		if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
@@ -181,11 +181,11 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 		// to keep track of TCP header
 		conn.lockflow(&src, func(e *tcpFlow) {
 			e.ts = time.Now()
-			if transport.ACK {
-				e.seq = transport.Ack
+			if tcp.ACK {
+				e.seq = tcp.Ack
 			}
-			if transport.SYN { // for SYN packets, try initialize the flow entry once
-				e.ack = transport.Seq + 1
+			if tcp.SYN { // for SYN packets, try initialize the flow entry once
+				e.ack = tcp.Seq + 1
 				select {
 				case <-e.writeReady:
 				default:
@@ -231,15 +231,15 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 						close(e.writeReady)
 					}
 				}
-			} else if transport.PSH {
-				e.ack += uint32(len(transport.Payload))
+			} else if tcp.PSH {
+				e.ack += uint32(len(tcp.Payload))
 			}
 		})
 
 		// deliver push data
-		if transport.PSH {
-			payload := make([]byte, len(transport.Payload))
-			copy(payload, transport.Payload)
+		if tcp.PSH {
+			payload := make([]byte, len(tcp.Payload))
+			copy(payload, tcp.Payload)
 			select {
 			case conn.chMessage <- message{payload, src.String()}:
 			case <-conn.die:
