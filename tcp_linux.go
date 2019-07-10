@@ -142,49 +142,27 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 		// build transient address
 		var src net.TCPAddr
 		src.Port = int(tcp.SrcPort)
-		var dst net.TCPAddr
-		dst.Port = int(tcp.DstPort)
 
 		// try IPv4 and IPv6
 		if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
 			network := layer.(*layers.IPv4)
 			src.IP = network.SrcIP
-			dst.IP = network.DstIP
 		} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
 			network := layer.(*layers.IPv6)
 			src.IP = network.SrcIP
-			dst.IP = network.DstIP
 		}
 
-		// compare IP and port, even though BPF has filtered some
-		if conn.tcpconn != nil {
-			raddr := conn.tcpconn.RemoteAddr().(*net.TCPAddr)
-			laddr := conn.tcpconn.LocalAddr().(*net.TCPAddr)
-
-			// 4-tuples
-			if raddr.Port != src.Port {
-				continue
-			} else if laddr.Port != dst.Port {
-				continue
-			} else if !raddr.IP.Equal(src.IP) {
-				continue
-			} else if !laddr.IP.Equal(dst.IP) {
-				continue
-			}
-		} else {
-			laddr := conn.listener.Addr().(*net.TCPAddr)
-			if laddr.Port != dst.Port { // to server
-				continue
-			}
-			if laddr.IP != nil && !laddr.IP.IsUnspecified() {
-				if !laddr.IP.Equal(dst.IP) {
-					continue
-				}
-			}
-		}
-
+		var orphan bool
 		// to keep track of TCP header
 		conn.lockflow(&src, func(e *tcpFlow) {
+			if e.conn != nil { // compare source address
+				raddr := e.conn.RemoteAddr().(*net.TCPAddr)
+				if !src.IP.Equal(raddr.IP) || src.Port != raddr.Port { // not my packet
+					return
+				}
+			} else {
+				orphan = true // mark as orphan if there is not related net.TCPConn
+			}
 			e.ts = time.Now()
 
 			if tcp.ACK {
@@ -244,7 +222,7 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 		})
 
 		// deliver push data
-		if tcp.PSH {
+		if !orphan && tcp.PSH {
 			payload := make([]byte, len(tcp.Payload))
 			copy(payload, tcp.Payload)
 			select {
@@ -472,9 +450,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	go conn.captureFlow(handle)
 
 	// record this flow
-	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) {
-		e.conn = tcpconn
-	})
+	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 
 	// iptables
 	err = setTTL(tcpconn, 1)
@@ -682,9 +658,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			}
 
 			// record net.Conn
-			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) {
-				e.conn = tcpconn
-			})
+			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 
 			go io.Copy(ioutil.Discard, tcpconn)
 		}
