@@ -68,7 +68,7 @@ type TCPConn struct {
 	ip6rule   []string
 }
 
-// lockflow locks the flow table and apply function `f1` to the entry
+// lockflow locks the flow table and apply function `f1` to the entry, create on if not exist
 func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	key := addr.String()
 	conn.flowsLock.Lock()
@@ -141,87 +141,96 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 
 		// build transient address
 		var src net.TCPAddr
+		var dst net.TCPAddr
 		src.Port = int(tcp.SrcPort)
+		dst.Port = int(tcp.DstPort)
 
 		// try IPv4 and IPv6
 		if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
 			network := layer.(*layers.IPv4)
 			src.IP = network.SrcIP
+			dst.IP = network.DstIP
 		} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
 			network := layer.(*layers.IPv6)
 			src.IP = network.SrcIP
+			dst.IP = network.DstIP
 		}
 
 		var orphan bool
-		// to keep track of TCP header
+		// flow maintaince
 		conn.lockflow(&src, func(e *tcpFlow) {
-			if e.conn != nil { // compare source address
+			if e.conn != nil { // make sure it's related to net.TCPConn
+				// compare with source address
 				raddr := e.conn.RemoteAddr().(*net.TCPAddr)
-				if !src.IP.Equal(raddr.IP) || src.Port != raddr.Port { // not my packet
+				laddr := e.conn.LocalAddr().(*net.TCPAddr)
+				// <4-tuple>
+				if !src.IP.Equal(raddr.IP) || src.Port != raddr.Port || !dst.IP.Equal(laddr.IP) || dst.Port != laddr.Port {
 					return
+				}
+
+				// to keep track of TCP header
+				e.ts = time.Now()
+				if tcp.ACK {
+					e.seq = tcp.Ack
+				}
+				if tcp.PSH {
+					e.ack = tcp.Seq + uint32(len(tcp.Payload))
+				}
+				if tcp.SYN {
+					e.ack = tcp.Seq + 1
+				}
+
+				// only init once
+				select {
+				case <-e.writeReady:
+				default:
+					e.handle = handle
+					// create link layer for WriteTo
+					if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
+						ethLayer := layer.(*layers.Ethernet)
+						e.linkLayer = &layers.Ethernet{
+							EthernetType: ethLayer.EthernetType,
+							SrcMAC:       ethLayer.DstMAC,
+							DstMAC:       ethLayer.SrcMAC,
+						}
+					} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
+						loopLayer := layer.(*layers.Loopback)
+						e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
+					}
+
+					// create network layer for WriteTo
+					if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
+						network := layer.(*layers.IPv4)
+						e.networkLayer = &layers.IPv4{
+							SrcIP:    network.DstIP,
+							DstIP:    network.SrcIP,
+							Protocol: network.Protocol,
+							Version:  network.Version,
+							Flags:    layers.IPv4DontFragment,
+							TTL:      64,
+						}
+					} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
+						network := layer.(*layers.IPv6)
+						e.networkLayer = &layers.IPv6{
+							Version:    network.Version,
+							NextHeader: network.NextHeader,
+							SrcIP:      network.DstIP,
+							DstIP:      network.SrcIP,
+							HopLimit:   64,
+						}
+					}
+
+					// this tcp flow is ready to operate based on flow information
+					if e.linkLayer != nil && e.networkLayer != nil {
+						close(e.writeReady)
+					}
 				}
 			} else {
 				orphan = true // mark as orphan if there is not related net.TCPConn
 			}
-			e.ts = time.Now()
-
-			if tcp.ACK {
-				e.seq = tcp.Ack
-			}
-			if tcp.PSH {
-				e.ack = tcp.Seq + uint32(len(tcp.Payload))
-			}
-			if tcp.SYN { // for SYN packets, try initializing the flow entry once
-				e.ack = tcp.Seq + 1
-			}
-
-			select {
-			case <-e.writeReady:
-			default:
-				e.handle = handle
-				// create link layer for WriteTo
-				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
-					ethLayer := layer.(*layers.Ethernet)
-					e.linkLayer = &layers.Ethernet{
-						EthernetType: ethLayer.EthernetType,
-						SrcMAC:       ethLayer.DstMAC,
-						DstMAC:       ethLayer.SrcMAC,
-					}
-				} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
-					loopLayer := layer.(*layers.Loopback)
-					e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
-				}
-
-				// create network layer for WriteTo
-				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-					network := layer.(*layers.IPv4)
-					e.networkLayer = &layers.IPv4{
-						SrcIP:    network.DstIP,
-						DstIP:    network.SrcIP,
-						Protocol: network.Protocol,
-						Version:  network.Version,
-						Flags:    layers.IPv4DontFragment,
-						TTL:      64,
-					}
-				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
-					network := layer.(*layers.IPv6)
-					e.networkLayer = &layers.IPv6{
-						Version:    network.Version,
-						NextHeader: network.NextHeader,
-						SrcIP:      network.DstIP,
-						DstIP:      network.SrcIP,
-						HopLimit:   64,
-					}
-				}
-
-				// this tcp flow is ready to operate based on flow information
-				if e.linkLayer != nil && e.networkLayer != nil {
-					close(e.writeReady)
-				}
-			}
 		})
 
-		// deliver push data
+		// push data if it's not orphan
 		if !orphan && tcp.PSH {
 			payload := make([]byte, len(tcp.Payload))
 			copy(payload, tcp.Payload)
@@ -447,10 +456,8 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.handles = []*afpacket.TPacket{handle}
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
-	go conn.captureFlow(handle)
-
-	// record this flow
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
+	go conn.captureFlow(handle)
 
 	// iptables
 	err = setTTL(tcpconn, 1)
