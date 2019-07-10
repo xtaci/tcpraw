@@ -160,10 +160,10 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 		// flow maintaince
 		conn.lockflow(&src, func(e *tcpFlow) {
 			if e.conn != nil { // make sure it's related to net.TCPConn
-				// compare with source address
+				// <4-tuple> comparison
+				// TODO: if golang BPF compiler is availabe, this is not necessary
 				raddr := e.conn.RemoteAddr().(*net.TCPAddr)
 				laddr := e.conn.LocalAddr().(*net.TCPAddr)
-				// <4-tuple>
 				if !src.IP.Equal(raddr.IP) || src.Port != raddr.Port || !dst.IP.Equal(laddr.IP) || dst.Port != laddr.Port {
 					return
 				}
