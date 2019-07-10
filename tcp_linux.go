@@ -226,7 +226,7 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 					}
 				}
 			} else {
-				orphan = true // mark as orphan if there is not related net.TCPConn
+				orphan = true // mark as orphan if it's not related net.TCPConn
 			}
 		})
 
