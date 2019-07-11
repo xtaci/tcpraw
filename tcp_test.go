@@ -1,15 +1,11 @@
 package tcpraw
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"testing"
-
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
 )
 
 //const testPortStream = "127.0.0.1:3456"
@@ -167,35 +163,5 @@ func BenchmarkEcho(b *testing.B) {
 		if n, addr, err := conn.ReadFrom(buf); err != nil {
 			b.Fatal(n, addr, err)
 		}
-	}
-}
-
-func TestCompileBPF(t *testing.T) {
-	filter := fmt.Sprintf("tcp and dst host 192.168.1.1 and dst port 255 and src host 192.168.1.1 and src port 256")
-	log.Println(filter)
-	if bpf, err := pcap.CompileBPFFilter(layers.LinkTypeIPv4, 1500, filter); err == nil {
-		log.Printf("ipv4: %v", bpf)
-	} else {
-		t.Fatal(err)
-	}
-	filter = fmt.Sprintf("tcp and dst host ::1 and dst port 255 and src host ::2 and src port 256")
-	if bpf, err := pcap.CompileBPFFilter(layers.LinkTypeIPv6, 1500, filter); err == nil {
-		log.Printf("ipv6: %v", bpf)
-	} else {
-		t.Fatal(err)
-	}
-
-	filter = fmt.Sprintf("tcp and dst port 255")
-	if bpf, err := pcap.CompileBPFFilter(layers.LinkTypeIPv6, 1500, filter); err == nil {
-		log.Printf("ipv6: %v", bpf)
-	} else {
-		t.Fatal(err)
-	}
-
-	filter = fmt.Sprintf("tcp and dst port 255")
-	if bpf, err := pcap.CompileBPFFilter(layers.LinkTypeIPv4, 1500, filter); err == nil {
-		log.Printf("ipv4: %v", bpf)
-	} else {
-		t.Fatal(err)
 	}
 }
