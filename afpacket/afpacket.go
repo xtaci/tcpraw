@@ -115,8 +115,6 @@ func (h *TPacket) setTPacketVersion(version OptTPacketVersion) error {
 // setRequestedTPacketVersion tries to set TPacket to the requested version or versions.
 func (h *TPacket) setRequestedTPacketVersion() error {
 	switch {
-	case (h.opts.version == TPacketVersionHighestAvailable || h.opts.version == TPacketVersion3) && h.setTPacketVersion(TPacketVersion3) == nil:
-		h.tpVersion = TPacketVersion3
 	case (h.opts.version == TPacketVersionHighestAvailable || h.opts.version == TPacketVersion2) && h.setTPacketVersion(TPacketVersion2) == nil:
 		h.tpVersion = TPacketVersion2
 	case (h.opts.version == TPacketVersionHighestAvailable || h.opts.version == TPacketVersion1) && h.setTPacketVersion(TPacketVersion1) == nil:

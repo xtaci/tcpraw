@@ -27,8 +27,6 @@ func (t OptTPacketVersion) String() string {
 		return "V1"
 	case TPacketVersion2:
 		return "V2"
-	case TPacketVersion3:
-		return "V3"
 	case TPacketVersionHighestAvailable:
 		return "HighestAvailable"
 	}
@@ -55,8 +53,7 @@ const (
 	TPacketVersionHighestAvailable = OptTPacketVersion(-1)
 	TPacketVersion1                = OptTPacketVersion(unix.TPACKET_V1)
 	TPacketVersion2                = OptTPacketVersion(unix.TPACKET_V2)
-	TPacketVersion3                = OptTPacketVersion(unix.TPACKET_V3)
-	tpacketVersionMax              = TPacketVersion3
+	tpacketVersionMax              = TPacketVersion2
 	tpacketVersionMin              = -1
 	// SocketRaw is the default socket type.  It returns packet data
 	// including the link layer (ethernet headers, etc).
