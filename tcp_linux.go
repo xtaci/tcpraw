@@ -14,8 +14,8 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/google/gopacket"
-	"github.com/google/gopacket/afpacket"
 	"github.com/google/gopacket/layers"
+	"github.com/xtaci/tcpraw/afpacket"
 	"golang.org/x/net/bpf"
 )
 
