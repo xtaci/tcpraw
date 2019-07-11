@@ -55,29 +55,6 @@ type Stats struct {
 	Polls int64
 }
 
-/*
-struct tpacket_stats {
-	unsigned int	tp_packets;
-	unsigned int	tp_drops;
-};
-*/
-
-// SocketStats is a struct where socket stats are stored
-type SocketStats struct {
-	tp_packets uint32
-	tp_drops   uint32
-}
-
-// Packets returns the number of packets seen by this socket.
-func (s *SocketStats) Packets() uint {
-	return uint(s.tp_packets)
-}
-
-// Drops returns the number of packets dropped on this socket.
-func (s *SocketStats) Drops() uint {
-	return uint(s.tp_drops)
-}
-
 // TPacket implements packet receiving for Linux AF_PACKET versions 1, 2, and 3.
 type TPacket struct {
 	// stats is simple statistics on TPacket's run. This MUST be the first entry to ensure alignment for sync.atomic
@@ -215,6 +192,10 @@ func NewTPacket(opts ...interface{}) (h *TPacket, err error) {
 	if err = h.setUpRing(); err != nil {
 		goto errlbl
 	}
+	// Clear stat counter from socket
+	if err = h.InitSocketStats(); err != nil {
+		goto errlbl
+	}
 	runtime.SetFinalizer(h, (*TPacket).Close)
 	return h, nil
 errlbl:
@@ -274,6 +255,7 @@ retry:
 	ci.Timestamp = h.current.getTime()
 	ci.CaptureLength = len(data)
 	ci.Length = h.current.getLength()
+	ci.InterfaceIndex = h.current.getIfaceIndex()
 	vlan := h.current.getVLAN()
 	if vlan >= 0 {
 		ci.AncillaryData = append(ci.AncillaryData, AncillaryVLAN{vlan})
@@ -291,6 +273,38 @@ func (h *TPacket) Stats() (Stats, error) {
 		Polls:   atomic.LoadInt64(&h.stats.Polls),
 		Packets: atomic.LoadInt64(&h.stats.Packets),
 	}, nil
+}
+
+// InitSocketStats clears socket counters and return empty stats.
+func (h *TPacket) InitSocketStats() error {
+	socklen := unsafe.Sizeof(h.socketStats)
+	slt := int(socklen)
+	var ss SocketStats
+
+	err := getsockopt(h.fd, unix.SOL_PACKET, unix.PACKET_STATISTICS, unsafe.Pointer(&ss), uintptr(unsafe.Pointer(&slt)))
+	if err != nil {
+		return err
+	}
+	h.socketStats = SocketStats{}
+	return nil
+}
+
+// SocketStats saves stats from the socket to the TPacket instance.
+func (h *TPacket) SocketStats() (SocketStats, error) {
+	h.statsMu.Lock()
+	defer h.statsMu.Unlock()
+	socklen := unsafe.Sizeof(h.socketStats)
+	slt := int(socklen)
+	var ss SocketStats
+
+	err := getsockopt(h.fd, unix.SOL_PACKET, unix.PACKET_STATISTICS, unsafe.Pointer(&ss), uintptr(unsafe.Pointer(&slt)))
+	if err != nil {
+		return SocketStats{}, err
+	}
+
+	h.socketStats.tp_packets += ss.tp_packets
+	h.socketStats.tp_drops += ss.tp_drops
+	return h.socketStats, nil
 }
 
 // ReadPacketDataTo reads packet data into a user-supplied buffer.
@@ -324,6 +338,12 @@ func (h *TPacket) ReadPacketData() (data []byte, ci gopacket.CaptureInfo, err er
 
 func (h *TPacket) getTPacketHeader() header {
 	switch h.tpVersion {
+	case TPacketVersion1:
+		if h.offset >= h.opts.framesPerBlock*h.opts.numBlocks {
+			h.offset = 0
+		}
+		position := uintptr(h.rawring) + uintptr(h.opts.frameSize*h.offset)
+		return (*v1header)(unsafe.Pointer(position))
 	case TPacketVersion2:
 		if h.offset >= h.opts.framesPerBlock*h.opts.numBlocks {
 			h.offset = 0
@@ -391,8 +411,8 @@ const (
 func (h *TPacket) SetFanout(t FanoutType, id uint16) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	arg := int32(t) << 16
-	arg |= int32(id)
+	arg := int(t) << 16
+	arg |= int(id)
 	return setsockopt(h.fd, unix.SOL_PACKET, unix.PACKET_FANOUT, unsafe.Pointer(&arg), unsafe.Sizeof(arg))
 }
 
