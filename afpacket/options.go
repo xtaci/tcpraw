@@ -173,8 +173,8 @@ func parseOptions(opts ...interface{}) (ret options, err error) {
 }
 func (o options) check() error {
 	switch {
-	case o.blockSize%unix.Getpagesize() != 0:
-		return fmt.Errorf("block size %d must be divisible by page size %d", o.blockSize, unix.Getpagesize())
+	case o.blockSize%pageSize != 0:
+		return fmt.Errorf("block size %d must be divisible by page size %d", o.blockSize, pageSize)
 	case o.blockSize%o.frameSize != 0:
 		return fmt.Errorf("block size %d must be divisible by frame size %d", o.blockSize, o.frameSize)
 	case o.numBlocks < 1:
