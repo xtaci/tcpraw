@@ -48,8 +48,6 @@ type TCPConn struct {
 	tcpconn  *net.TCPConn     // from net.Dial
 	listener *net.TCPListener // from net.Listen
 
-	// handle for capturing/sending
-	handle *net.IPConn
 	// packets captured from all related NICs will be delivered to this channel
 	chMessage chan message
 
@@ -121,19 +119,15 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn) {
 		default:
 		}
 
-		// try decoding as an Ethernet frame
+		// try reading TCP frame
 		packet := gopacket.NewPacket(data, layers.LayerTypeTCP, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
 		transport := packet.TransportLayer()
-		// try casting to TCP frame
 		tcp, ok := transport.(*layers.TCP)
 		if !ok {
 			continue
 		}
 
-		var src net.TCPAddr
-		src.IP = addr.IP
-		src.Port = int(tcp.SrcPort)
-
+		// port filtering
 		var localAddr *net.TCPAddr
 		if conn.tcpconn != nil {
 			localAddr = conn.tcpconn.LocalAddr().(*net.TCPAddr)
@@ -144,6 +138,11 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn) {
 		if int(tcp.DstPort) != localAddr.Port {
 			continue
 		}
+
+		// address building
+		var src net.TCPAddr
+		src.IP = addr.IP
+		src.Port = int(tcp.SrcPort)
 
 		var orphan bool
 		// flow maintaince
@@ -207,7 +206,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	case <-conn.die:
 		return 0, io.EOF
 	case <-ready:
-		tcpaddr, err := net.ResolveTCPAddr("tcp", addr.String())
+		raddr, err := net.ResolveTCPAddr("tcp", addr.String())
 		if err != nil {
 			return 0, err
 		}
@@ -222,15 +221,15 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		var flow tcpFlow
 		conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
 
-		var localAddr *net.TCPAddr
+		var laddr *net.TCPAddr
 		if conn.tcpconn != nil {
-			localAddr = conn.tcpconn.LocalAddr().(*net.TCPAddr)
+			laddr = conn.tcpconn.LocalAddr().(*net.TCPAddr)
 		} else {
-			localAddr = conn.listener.Addr().(*net.TCPAddr)
+			laddr = conn.listener.Addr().(*net.TCPAddr)
 		}
 		tcp := &layers.TCP{
-			SrcPort: layers.TCPPort(localAddr.Port),
-			DstPort: layers.TCPPort(tcpaddr.Port),
+			SrcPort: layers.TCPPort(laddr.Port),
+			DstPort: layers.TCPPort(raddr.Port),
 			Window:  12580,
 			Ack:     flow.ack,
 			Seq:     flow.seq,
@@ -238,19 +237,19 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			ACK:     true,
 		}
 
-		if tcpaddr.IP.To4() != nil {
+		if raddr.IP.To4() != nil {
 			ip := &layers.IPv4{
 				Protocol: layers.IPProtocolTCP,
-				SrcIP:    localAddr.IP.To4(),
-				DstIP:    tcpaddr.IP.To4(),
+				SrcIP:    laddr.IP.To4(),
+				DstIP:    raddr.IP.To4(),
 			}
 
 			tcp.SetNetworkLayerForChecksum(ip)
 		} else {
 			ip := &layers.IPv6{
 				NextHeader: layers.IPProtocolTCP,
-				SrcIP:      localAddr.IP.To16(),
-				DstIP:      tcpaddr.IP.To16(),
+				SrcIP:      laddr.IP.To16(),
+				DstIP:      raddr.IP.To16(),
 			}
 			tcp.SetNetworkLayerForChecksum(ip)
 		}
@@ -262,7 +261,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 				return 0, err
 			}
 		} else {
-			if _, err := flow.handle.WriteToIP(buf.Bytes(), &net.IPAddr{IP: tcpaddr.IP}); err != nil {
+			if _, err := flow.handle.WriteToIP(buf.Bytes(), &net.IPAddr{IP: raddr.IP}); err != nil {
 				return 0, err
 			}
 		}
@@ -343,15 +342,8 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// afpacket init
-	var ipnet string
-	if raddr.IP.To4() != nil {
-		ipnet = "ip4:tcp"
-	} else {
-		ipnet = "ip6:tcp"
-	}
-
-	handle, err := net.DialIP(ipnet, &net.IPAddr{IP: dummy.LocalAddr().(*net.UDPAddr).IP}, &net.IPAddr{IP: raddr.IP})
+	// AF_INET
+	handle, err := net.DialIP("ip:tcp", &net.IPAddr{IP: dummy.LocalAddr().(*net.UDPAddr).IP}, &net.IPAddr{IP: raddr.IP})
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +366,6 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
 	conn.die = make(chan struct{})
 	conn.flowTable = make(map[string]tcpFlow)
-	conn.handle = handle
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
@@ -430,19 +421,30 @@ func Listen(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// afpacket init
-	var ipnet string
-	if laddr.IP.To4() != nil {
-		ipnet = "ip4:tcp"
-	} else {
-		ipnet = "ip6:tcp"
+	// AF_INET
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
 	}
 
-	if handle, err := net.ListenIP(ipnet, &net.IPAddr{IP: laddr.IP}); err == nil {
-		conn.handle = handle
-		go conn.captureFlow(handle)
+	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all ifaces
+		for _, iface := range ifaces {
+			if addrs, err := iface.Addrs(); err == nil {
+				for _, addr := range addrs {
+					if ipaddr, ok := addr.(*net.IPNet); ok {
+						if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP}); err == nil {
+							go conn.captureFlow(handle)
+						}
+					}
+				}
+			}
+		}
 	} else {
-		return nil, err
+		if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: laddr.IP}); err == nil {
+			go conn.captureFlow(handle)
+		} else {
+			return nil, err
+		}
 	}
 
 	// start listening
