@@ -15,8 +15,6 @@ import (
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/xtaci/tcpraw/afpacket"
-	"golang.org/x/net/bpf"
 )
 
 var (
@@ -34,10 +32,9 @@ type message struct {
 type tcpFlow struct {
 	writeReady   chan struct{}              // mark whether this flow is ready to WriteTo
 	conn         *net.TCPConn               // the related system TCP connection of this flow
-	handle       *afpacket.TPacket          // the handle to send packets
+	handle       *net.IPConn                // the handle to send packets
 	seq          uint32                     // TCP sequence number
 	ack          uint32                     // TCP acknowledge number
-	linkLayer    gopacket.SerializableLayer // link layer header for tx
 	networkLayer gopacket.SerializableLayer // network layer header for tx
 	ts           time.Time                  // last packet incoming time
 }
@@ -51,8 +48,8 @@ type TCPConn struct {
 	tcpconn  *net.TCPConn     // from net.Dial
 	listener *net.TCPListener // from net.Listen
 
-	// all handles for capturing on all related NICs
-	handles []*afpacket.TPacket
+	// handle for capturing/sending
+	handle *net.IPConn
 	// packets captured from all related NICs will be delivered to this channel
 	chMessage chan message
 
@@ -104,15 +101,17 @@ func (conn *TCPConn) cleaner() {
 }
 
 // captureFlow capture every inbound packets based on rules of BPF
-func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
+func (conn *TCPConn) captureFlow(handle *net.IPConn) {
 	defer handle.Close()
 
+	data := make([]byte, 2048)
 	for {
-		data, _, err := handle.ZeroCopyReadPacketData()
+		n, addr, err := handle.ReadFromIP(data[:cap(data)])
 		if err != nil {
 			return
 		}
 
+		data := data[:n]
 		// handle cannot be closed in a seperate goroutine,
 		// if packets keep on flowing on this NIC
 		// this goroutine will return eventually
@@ -123,38 +122,17 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 		}
 
 		// try decoding as an Ethernet frame
-		packet := gopacket.NewPacket(data, layers.LinkTypeEthernet, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
+		packet := gopacket.NewPacket(data, layers.LayerTypeTCP, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
 		transport := packet.TransportLayer()
-		if transport == nil { // retry as loopback frame
-			packet = gopacket.NewPacket(data, layers.LinkTypeLoop, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
-			transport = packet.TransportLayer()
-			if transport == nil {
-				continue
-			}
-		}
-
 		// try casting to TCP frame
 		tcp, ok := transport.(*layers.TCP)
 		if !ok {
 			continue
 		}
 
-		// build transient address
 		var src net.TCPAddr
-		var dst net.TCPAddr
+		src.IP = addr.IP
 		src.Port = int(tcp.SrcPort)
-		dst.Port = int(tcp.DstPort)
-
-		// try IPv4 and IPv6
-		if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-			network := layer.(*layers.IPv4)
-			src.IP = network.SrcIP
-			dst.IP = network.DstIP
-		} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
-			network := layer.(*layers.IPv6)
-			src.IP = network.SrcIP
-			dst.IP = network.DstIP
-		}
 
 		var orphan bool
 		// flow maintaince
@@ -180,45 +158,7 @@ func (conn *TCPConn) captureFlow(handle *afpacket.TPacket) {
 			case <-e.writeReady:
 			default:
 				e.handle = handle
-				// create link layer for WriteTo
-				if layer := packet.Layer(layers.LayerTypeEthernet); layer != nil {
-					ethLayer := layer.(*layers.Ethernet)
-					e.linkLayer = &layers.Ethernet{
-						EthernetType: ethLayer.EthernetType,
-						SrcMAC:       ethLayer.DstMAC,
-						DstMAC:       ethLayer.SrcMAC,
-					}
-				} else if layer := packet.Layer(layers.LayerTypeLoopback); layer != nil {
-					loopLayer := layer.(*layers.Loopback)
-					e.linkLayer = &layers.Loopback{Family: loopLayer.Family}
-				}
-
-				// create network layer for WriteTo
-				if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-					network := layer.(*layers.IPv4)
-					e.networkLayer = &layers.IPv4{
-						SrcIP:    network.DstIP,
-						DstIP:    network.SrcIP,
-						Protocol: network.Protocol,
-						Version:  network.Version,
-						Flags:    layers.IPv4DontFragment,
-						TTL:      64,
-					}
-				} else if layer := packet.Layer(layers.LayerTypeIPv6); layer != nil {
-					network := layer.(*layers.IPv6)
-					e.networkLayer = &layers.IPv6{
-						Version:    network.Version,
-						NextHeader: network.NextHeader,
-						SrcIP:      network.DstIP,
-						DstIP:      network.SrcIP,
-						HopLimit:   64,
-					}
-				}
-
-				// this tcp flow is ready to operate based on flow information
-				if e.linkLayer != nil && e.networkLayer != nil {
-					close(e.writeReady)
-				}
+				close(e.writeReady)
 			}
 		})
 
@@ -287,14 +227,35 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			ACK:     true,
 		}
 
-		tcp.SetNetworkLayerForChecksum(flow.networkLayer.(gopacket.NetworkLayer))
+		if tcpaddr.IP.To4() != nil {
+			ip := &layers.IPv4{
+				Protocol: layers.IPProtocolTCP,
+				SrcIP:    localAddr.IP.To4(),
+				DstIP:    tcpaddr.IP.To4(),
+			}
+
+			tcp.SetNetworkLayerForChecksum(ip)
+		} else {
+			ip := &layers.IPv6{
+				NextHeader: layers.IPProtocolTCP,
+				SrcIP:      localAddr.IP.To16(),
+				DstIP:      tcpaddr.IP.To16(),
+			}
+			tcp.SetNetworkLayerForChecksum(ip)
+		}
 
 		payload := gopacket.Payload(p)
-
-		gopacket.SerializeLayers(buf, opts, flow.linkLayer, flow.networkLayer, tcp, payload)
-		if err := flow.handle.WritePacketData(buf.Bytes()); err != nil {
-			return 0, err
+		gopacket.SerializeLayers(buf, opts, tcp, payload)
+		if flow.handle.RemoteAddr() != nil {
+			if _, err := flow.handle.Write(buf.Bytes()); err != nil {
+				return 0, err
+			}
+		} else {
+			if _, err := flow.handle.WriteToIP(buf.Bytes(), &net.IPAddr{IP: tcpaddr.IP}); err != nil {
+				return 0, err
+			}
 		}
+
 		buf.Clear()
 
 		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
@@ -371,36 +332,15 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// get iface name from the dummy connection, eg. eth0, lo0
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
-	}
-
-	var ifaceName string
-	for _, iface := range ifaces {
-		if addrs, err := iface.Addrs(); err == nil {
-			for _, addr := range addrs {
-				if ipaddr, ok := addr.(*net.IPNet); ok {
-					if ipaddr.IP.Equal(dummy.LocalAddr().(*net.UDPAddr).IP) {
-						ifaceName = iface.Name
-					}
-				}
-			}
-		}
-	}
-	if ifaceName == "" {
-		return nil, errors.New("cannot find correct interface")
-	}
-
 	// afpacket init
-	handle, err := afpacket.NewTPacket(
-		afpacket.OptInterface(ifaceName),
-		afpacket.OptNumBlocks(1),
-		afpacket.OptBlockSize(65536),
-		afpacket.OptFrameSize(2048),
-		afpacket.SocketRaw,
-		afpacket.TPacketVersion1)
+	var ipnet string
+	if raddr.IP.To4() != nil {
+		ipnet = "ip4:tcp"
+	} else {
+		ipnet = "ip6:tcp"
+	}
+
+	handle, err := net.DialIP(ipnet, &net.IPAddr{IP: dummy.LocalAddr().(*net.UDPAddr).IP}, &net.IPAddr{IP: raddr.IP})
 	if err != nil {
 		return nil, err
 	}
@@ -414,25 +354,27 @@ func Dial(network, address string) (*TCPConn, error) {
 
 	// apply filter
 	// tcpdump -dd tcp and dst port 255
-	filter := []bpf.RawInstruction{
-		{0x28, 0, 0, 0x0000000c},
-		{0x15, 0, 4, 0x000086dd},
-		{0x30, 0, 0, 0x00000014},
-		{0x15, 0, 11, 0x00000006},
-		{0x28, 0, 0, 0x00000038},
-		{0x15, 8, 9, uint32(laddr.Port)},
-		{0x15, 0, 8, 0x00000800},
-		{0x30, 0, 0, 0x00000017},
-		{0x15, 0, 6, 0x00000006},
-		{0x28, 0, 0, 0x00000014},
-		{0x45, 4, 0, 0x00001fff},
-		{0xb1, 0, 0, 0x0000000e},
-		{0x48, 0, 0, 0x00000010},
-		{0x15, 0, 1, uint32(laddr.Port)},
-		{0x6, 0, 0, 0x00040000},
-		{0x6, 0, 0, 0x00000000}}
+	/*
+		filter := []bpf.RawInstruction{
+			{0x28, 0, 0, 0x0000000c},
+			{0x15, 0, 4, 0x000086dd},
+			{0x30, 0, 0, 0x00000014},
+			{0x15, 0, 11, 0x00000006},
+			{0x28, 0, 0, 0x00000038},
+			{0x15, 8, 9, uint32(laddr.Port)},
+			{0x15, 0, 8, 0x00000800},
+			{0x30, 0, 0, 0x00000017},
+			{0x15, 0, 6, 0x00000006},
+			{0x28, 0, 0, 0x00000014},
+			{0x45, 4, 0, 0x00001fff},
+			{0xb1, 0, 0, 0x0000000e},
+			{0x48, 0, 0, 0x00000010},
+			{0x15, 0, 1, uint32(laddr.Port)},
+			{0x6, 0, 0, 0x00040000},
+			{0x6, 0, 0, 0x00000000}}
 
-	handle.SetBPF(filter)
+		ipv4.NewPacketConn(handle).SetBPF(filter)
+	*/
 
 	// create an established tcp connection
 	// will hack this tcp connection for packet transmission
@@ -445,7 +387,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
 	conn.die = make(chan struct{})
 	conn.flowTable = make(map[string]tcpFlow)
-	conn.handles = []*afpacket.TPacket{handle}
+	conn.handle = handle
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
@@ -489,89 +431,28 @@ func Dial(network, address string) (*TCPConn, error) {
 // Listen acts like net.ListenTCP,
 // and returns a single packet-oriented connection
 func Listen(network, address string) (*TCPConn, error) {
+	// fields
+	conn := new(TCPConn)
+	conn.flowTable = make(map[string]tcpFlow)
+	conn.die = make(chan struct{})
+	conn.chMessage = make(chan message)
+
+	// resolve address
 	laddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err
 	}
 
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
+	// afpacket init
+	var ipnet string
+	if laddr.IP.To4() != nil {
+		ipnet = "ip4:tcp"
+	} else {
+		ipnet = "ip6:tcp"
 	}
 
-	var handles []*afpacket.TPacket
-	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all ifaces
-		for _, iface := range ifaces {
-			if addrs, err := iface.Addrs(); err == nil {
-				var hasIP bool
-				for _, addr := range addrs {
-					if _, ok := addr.(*net.IPNet); ok {
-						hasIP = true
-						break
-					}
-				}
-
-				// try open on all nics
-				if hasIP {
-					if handle, err := afpacket.NewTPacket(
-						afpacket.OptInterface(iface.Name),
-						afpacket.OptNumBlocks(1),
-						afpacket.OptBlockSize(65536),
-						afpacket.OptFrameSize(2048),
-						afpacket.SocketRaw,
-						afpacket.TPacketVersion1); err == nil {
-						handles = append(handles, handle)
-						// apply filter
-						filter := []bpf.RawInstruction{
-							{0x28, 0, 0, 0x0000000c},
-							{0x15, 0, 4, 0x000086dd},
-							{0x30, 0, 0, 0x00000014},
-							{0x15, 0, 11, 0x00000006},
-							{0x28, 0, 0, 0x00000038},
-							{0x15, 8, 9, uint32(laddr.Port)},
-							{0x15, 0, 8, 0x00000800},
-							{0x30, 0, 0, 0x00000017},
-							{0x15, 0, 6, 0x00000006},
-							{0x28, 0, 0, 0x00000014},
-							{0x45, 4, 0, 0x00001fff},
-							{0xb1, 0, 0, 0x0000000e},
-							{0x48, 0, 0, 0x00000010},
-							{0x15, 0, 1, uint32(laddr.Port)},
-							{0x6, 0, 0, 0x00040000},
-							{0x6, 0, 0, 0x00000000}}
-
-						handle.SetBPF(filter)
-					} else {
-						return nil, err
-					}
-				}
-			}
-		}
-	} else {
-		var ifaceName string
-		for _, iface := range ifaces {
-			if addrs, err := iface.Addrs(); err == nil {
-				for _, addr := range addrs {
-					if ipaddr, ok := addr.(*net.IPNet); ok {
-						if ipaddr.IP.Equal(laddr.IP) {
-							ifaceName = iface.Name
-						}
-					}
-				}
-			}
-		}
-		if ifaceName == "" {
-			return nil, errors.New("cannot find correct interface")
-		}
-
-		// afpacket init
-		if handle, err := afpacket.NewTPacket(
-			afpacket.OptInterface(ifaceName),
-			afpacket.OptNumBlocks(1),
-			afpacket.OptBlockSize(65536),
-			afpacket.OptFrameSize(2048),
-			afpacket.SocketRaw,
-			afpacket.TPacketVersion1); err == nil {
+	if handle, err := net.ListenIP(ipnet, &net.IPAddr{IP: laddr.IP}); err == nil {
+		/*
 			// apply filter
 			filter := []bpf.RawInstruction{
 				{0x28, 0, 0, 0x0000000c},
@@ -591,11 +472,12 @@ func Listen(network, address string) (*TCPConn, error) {
 				{0x6, 0, 0, 0x00040000},
 				{0x6, 0, 0, 0x00000000}}
 
-			handle.SetBPF(filter)
-			handles = []*afpacket.TPacket{handle}
-		} else {
-			return nil, err
-		}
+			ipv4.NewPacketConn(handle).SetBPF(filter)
+		*/
+		conn.handle = handle
+		go conn.captureFlow(handle)
+	} else {
+		return nil, err
 	}
 
 	// start listening
@@ -604,12 +486,6 @@ func Listen(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// fields
-	conn := new(TCPConn)
-	conn.handles = handles
-	conn.flowTable = make(map[string]tcpFlow)
-	conn.die = make(chan struct{})
-	conn.chMessage = make(chan message)
 	conn.listener = l
 
 	// iptables drop packets marked with TTL = 1
@@ -636,11 +512,6 @@ func Listen(network, address string) (*TCPConn, error) {
 				}
 			}
 		}
-	}
-
-	// start capturing
-	for k := range handles {
-		go conn.captureFlow(handles[k])
 	}
 
 	// discard everything in original connection
