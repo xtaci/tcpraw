@@ -32,6 +32,7 @@ type message struct {
 
 // a tcp flow information of a connection pair
 type tcpFlow struct {
+	laddr        net.IP                     // the sending IP address
 	writeReady   chan struct{}              // mark whether this flow is ready to WriteTo
 	conn         *net.TCPConn               // the related system TCP connection of this flow
 	handle       *net.IPConn                // the handle to send packets
@@ -173,6 +174,9 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn) {
 			select {
 			case <-e.writeReady:
 			default:
+				ipaddr := handle.LocalAddr().(*net.IPAddr)
+				e.laddr = make([]byte, len(ipaddr.IP))
+				copy(e.laddr, ipaddr.IP)
 				e.handle = handle
 				close(e.writeReady)
 			}
@@ -246,14 +250,15 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		var flow tcpFlow
 		conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
 
-		var laddr *net.TCPAddr
+		// build tcp header with local and remote port
+		var lport int
 		if conn.tcpconn != nil {
-			laddr = conn.tcpconn.LocalAddr().(*net.TCPAddr)
+			lport = conn.tcpconn.LocalAddr().(*net.TCPAddr).Port
 		} else {
-			laddr = conn.listener.Addr().(*net.TCPAddr)
+			lport = conn.listener.Addr().(*net.TCPAddr).Port
 		}
 		tcp := &layers.TCP{
-			SrcPort: layers.TCPPort(laddr.Port),
+			SrcPort: layers.TCPPort(lport),
 			DstPort: layers.TCPPort(raddr.Port),
 			Window:  12580,
 			Ack:     flow.ack,
@@ -262,10 +267,11 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			ACK:     true,
 		}
 
+		// build IP header with src & dst ip
 		if raddr.IP.To4() != nil {
 			ip := &layers.IPv4{
 				Protocol: layers.IPProtocolTCP,
-				SrcIP:    laddr.IP.To4(),
+				SrcIP:    flow.laddr.To4(),
 				DstIP:    raddr.IP.To4(),
 			}
 
@@ -273,7 +279,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		} else {
 			ip := &layers.IPv6{
 				NextHeader: layers.IPProtocolTCP,
-				SrcIP:      laddr.IP.To16(),
+				SrcIP:      flow.laddr.To16(),
 				DstIP:      raddr.IP.To16(),
 			}
 			tcp.SetNetworkLayerForChecksum(ip)
