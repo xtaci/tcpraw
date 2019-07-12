@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 
 var (
 	errOpNotImplemented = errors.New("operation not implemented")
+	errTimeout          = errors.New("timeout")
 	expire              = time.Minute
 )
 
@@ -61,6 +63,10 @@ type TCPConn struct {
 
 	ip6tables *iptables.IPTables
 	ip6rule   []string
+
+	// deadlines
+	readDeadline  atomic.Value
+	writeDeadline atomic.Value
 }
 
 // lockflow locks the flow table and apply function `f1` to the entry, create on if not exist
@@ -187,7 +193,17 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn) {
 
 // ReadFrom implements the PacketConn ReadFrom method.
 func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	var timer *time.Timer
+	var deadline <-chan time.Time
+	if d, ok := conn.readDeadline.Load().(time.Time); ok && !d.IsZero() {
+		timer = time.NewTimer(time.Until(d))
+		defer timer.Stop()
+		deadline = timer.C
+	}
+
 	select {
+	case <-deadline:
+		return 0, nil, errTimeout
 	case <-conn.die:
 		return 0, nil, io.EOF
 	case packet := <-conn.chMessage:
@@ -202,7 +218,16 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	var ready chan struct{}
 	conn.lockflow(addr, func(e *tcpFlow) { ready = e.writeReady })
 
+	var deadline <-chan time.Time
+	if d, ok := conn.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
+		timer := time.NewTimer(time.Until(d))
+		defer timer.Stop()
+		deadline = timer.C
+	}
+
 	select {
+	case <-deadline:
+		return 0, errTimeout
 	case <-conn.die:
 		return 0, io.EOF
 	case <-ready:
@@ -319,13 +344,27 @@ func (conn *TCPConn) LocalAddr() net.Addr {
 }
 
 // SetDeadline implements the Conn SetDeadline method.
-func (conn *TCPConn) SetDeadline(t time.Time) error { return errOpNotImplemented }
+func (conn *TCPConn) SetDeadline(t time.Time) error {
+	if err := conn.SetReadDeadline(t); err != nil {
+		return err
+	}
+	if err := conn.SetWriteDeadline(t); err != nil {
+		return err
+	}
+	return nil
+}
 
 // SetReadDeadline implements the Conn SetReadDeadline method.
-func (conn *TCPConn) SetReadDeadline(t time.Time) error { return errOpNotImplemented }
+func (conn *TCPConn) SetReadDeadline(t time.Time) error {
+	conn.readDeadline.Store(t)
+	return nil
+}
 
 // SetWriteDeadline implements the Conn SetWriteDeadline method.
-func (conn *TCPConn) SetWriteDeadline(t time.Time) error { return errOpNotImplemented }
+func (conn *TCPConn) SetWriteDeadline(t time.Time) error {
+	conn.writeDeadline.Store(t)
+	return nil
+}
 
 // Dial connects to the remote TCP port,
 // and returns a single packet-oriented connection
