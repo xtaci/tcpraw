@@ -400,7 +400,7 @@ func Dial(network, address string) (*TCPConn, error) {
 		afpacket.OptBlockSize(65536),
 		afpacket.OptFrameSize(2048),
 		afpacket.SocketRaw,
-		afpacket.TPacketVersion2)
+		afpacket.TPacketVersion1)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +519,7 @@ func Listen(network, address string) (*TCPConn, error) {
 						afpacket.OptBlockSize(65536),
 						afpacket.OptFrameSize(2048),
 						afpacket.SocketRaw,
-						afpacket.TPacketVersion2); err == nil {
+						afpacket.TPacketVersion1); err == nil {
 						handles = append(handles, handle)
 						// apply filter
 						filter := []bpf.RawInstruction{
@@ -571,7 +571,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			afpacket.OptBlockSize(65536),
 			afpacket.OptFrameSize(2048),
 			afpacket.SocketRaw,
-			afpacket.TPacketVersion2); err == nil {
+			afpacket.TPacketVersion1); err == nil {
 			// apply filter
 			filter := []bpf.RawInstruction{
 				{0x28, 0, 0, 0x0000000c},
