@@ -11,7 +11,7 @@ import (
 //const testPortStream = "127.0.0.1:3456"
 //const testPortPacket = "127.0.0.1:3457"
 
-const testPortStream = ":3456"
+const testPortStream = "127.0.0.1:3456"
 const portServerPacket = ":3457"
 const portRemotePacket = "127.0.0.1:3457"
 
