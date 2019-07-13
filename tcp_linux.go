@@ -270,7 +270,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 
 		payload := gopacket.Payload(p)
 		gopacket.SerializeLayers(buf, opts, tcp, payload)
-		if flow.handle.RemoteAddr() != nil {
+		if conn.tcpconn != nil {
 			if _, err := flow.handle.Write(buf.Bytes()); err != nil {
 				return 0, err
 			}
