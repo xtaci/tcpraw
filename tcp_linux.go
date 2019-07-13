@@ -51,6 +51,9 @@ type TCPConn struct {
 	tcpconn  *net.TCPConn     // from net.Dial
 	listener *net.TCPListener // from net.Listen
 
+	// handles
+	handles []*net.IPConn
+
 	// packets captured from all related NICs will be delivered to this channel
 	chMessage chan message
 
@@ -107,27 +110,15 @@ func (conn *TCPConn) cleaner() {
 
 // captureFlow capture every inbound packets based on rules of BPF
 func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
-	defer handle.Close()
-
-	data := make([]byte, 2048)
+	buf := make([]byte, 2048)
 	for {
-		n, addr, err := handle.ReadFromIP(data[:cap(data)])
+		n, addr, err := handle.ReadFromIP(buf)
 		if err != nil {
 			return
 		}
 
-		data := data[:n]
-		// handle cannot be closed in a seperate goroutine,
-		// if packets keep on flowing on this NIC
-		// this goroutine will return eventually
-		select {
-		case <-conn.die:
-			return
-		default:
-		}
-
-		// try reading TCP frame
-		packet := gopacket.NewPacket(data, layers.LayerTypeTCP, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
+		// try decoding TCP frame from buf[:n]
+		packet := gopacket.NewPacket(buf[:n], layers.LayerTypeTCP, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
 		transport := packet.TransportLayer()
 		tcp, ok := transport.(*layers.TCP)
 		if !ok {
@@ -320,6 +311,11 @@ func (conn *TCPConn) Close() error {
 			conn.flowsLock.Unlock()
 		}
 
+		// close handles
+		for k := range conn.handles {
+			conn.handles[k].Close()
+		}
+
 		// delete iptable
 		if conn.iptables != nil {
 			conn.iptables.Delete("filter", "OUTPUT", conn.iprule...)
@@ -393,6 +389,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
+	conn.handles = append(conn.handles, handle)
 	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port)
 
 	// iptables
@@ -457,6 +454,7 @@ func Listen(network, address string) (*TCPConn, error) {
 				for _, addr := range addrs {
 					if ipaddr, ok := addr.(*net.IPNet); ok {
 						if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP}); err == nil {
+							conn.handles = append(conn.handles, handle)
 							go conn.captureFlow(handle, laddr.Port)
 						}
 					}
@@ -465,6 +463,7 @@ func Listen(network, address string) (*TCPConn, error) {
 		}
 	} else {
 		if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: laddr.IP}); err == nil {
+			conn.handles = append(conn.handles, handle)
 			go conn.captureFlow(handle, laddr.Port)
 		} else {
 			return nil, err
