@@ -381,28 +381,15 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// create a dummy UDP socket, to get routing information
-	dummy, err := net.Dial("udp", address)
-	if err != nil {
-		return nil, err
-	}
-
 	// AF_INET
-	handle, err := net.DialIP("ip:tcp", &net.IPAddr{IP: dummy.LocalAddr().(*net.UDPAddr).IP}, &net.IPAddr{IP: raddr.IP})
+	handle, err := net.DialIP("ip:tcp", nil, &net.IPAddr{IP: raddr.IP})
 	if err != nil {
 		return nil, err
 	}
-
-	// TCP local address reuses the same address from UDP
-	laddr, err := net.ResolveTCPAddr(network, dummy.LocalAddr().String())
-	if err != nil {
-		return nil, err
-	}
-	dummy.Close()
 
 	// create an established tcp connection
 	// will hack this tcp connection for packet transmission
-	tcpconn, err := net.DialTCP(network, laddr, raddr)
+	tcpconn, err := net.DialTCP(network, nil, raddr)
 	if err != nil {
 		return nil, err
 	}
