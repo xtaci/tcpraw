@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,10 @@ var (
 	errTimeout          = errors.New("timeout")
 	expire              = time.Minute
 )
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
 
 // a message from NIC
 type message struct {
@@ -243,7 +248,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		tcp := &layers.TCP{
 			SrcPort: layers.TCPPort(lport),
 			DstPort: layers.TCPPort(raddr.Port),
-			Window:  12580,
+			Window:  uint16(rand.Intn(65536)),
 			Ack:     flow.ack,
 			Seq:     flow.seq,
 			PSH:     true,
