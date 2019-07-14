@@ -475,6 +475,10 @@ func Listen(network, address string) (*TCPConn, error) {
 		}
 	}
 
+	if len(conn.handles) == 0 {
+		return nil, errors.New("cannot net.ListenIP() on any address")
+	}
+
 	// start listening
 	l, err := net.ListenTCP(network, laddr)
 	if err != nil {
