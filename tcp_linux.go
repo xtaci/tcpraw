@@ -365,6 +365,24 @@ func (conn *TCPConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
+// SetReadBuffer sets the size of the operating system's receive buffer associated with the connection.
+func (conn *TCPConn) SetReadBuffer(bytes int) error {
+	var err error
+	for k := range conn.handles {
+		err = conn.handles[k].SetReadBuffer(bytes)
+	}
+	return err
+}
+
+// SetWriteBuffer sets the size of the operating system's transmit buffer associated with the connection.
+func (conn *TCPConn) SetWriteBuffer(bytes int) error {
+	var err error
+	for k := range conn.handles {
+		err = conn.handles[k].SetWriteBuffer(bytes)
+	}
+	return err
+}
+
 // Dial connects to the remote TCP port,
 // and returns a single packet-oriented connection
 func Dial(network, address string) (*TCPConn, error) {

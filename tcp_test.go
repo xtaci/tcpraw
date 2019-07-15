@@ -49,6 +49,14 @@ func startTCPRawServer() *TCPConn {
 	if err != nil {
 		log.Panicln(err)
 	}
+	err = conn.SetReadBuffer(1024 * 1024)
+	if err != nil {
+		log.Println(err)
+	}
+	err = conn.SetWriteBuffer(1024 * 1024)
+	if err != nil {
+		log.Println(err)
+	}
 
 	go func() {
 		defer conn.Close()
