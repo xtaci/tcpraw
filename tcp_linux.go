@@ -455,6 +455,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	}
 
 	if laddr.IP == nil || laddr.IP.IsUnspecified() { // if address is not specified, capture on all ifaces
+		var lasterr error
 		for _, iface := range ifaces {
 			if addrs, err := iface.Addrs(); err == nil {
 				for _, addr := range addrs {
@@ -462,10 +463,15 @@ func Listen(network, address string) (*TCPConn, error) {
 						if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP}); err == nil {
 							conn.handles = append(conn.handles, handle)
 							go conn.captureFlow(handle, laddr.Port)
+						} else {
+							lasterr = err
 						}
 					}
 				}
 			}
+		}
+		if len(conn.handles) == 0 {
+			return nil, lasterr
 		}
 	} else {
 		if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: laddr.IP}); err == nil {
@@ -474,10 +480,6 @@ func Listen(network, address string) (*TCPConn, error) {
 		} else {
 			return nil, err
 		}
-	}
-
-	if len(conn.handles) == 0 {
-		return nil, errors.New("cannot net.ListenIP() on any address")
 	}
 
 	// start listening
