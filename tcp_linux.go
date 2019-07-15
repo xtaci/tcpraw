@@ -396,6 +396,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 	conn.handles = append(conn.handles, handle)
 	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port)
+	go conn.cleaner()
 
 	// iptables
 	err = setTTL(tcpconn, 1)
@@ -486,6 +487,9 @@ func Listen(network, address string) (*TCPConn, error) {
 	}
 
 	conn.listener = l
+
+	// start cleaner
+	go conn.cleaner()
 
 	// iptables drop packets marked with TTL = 1
 	// TODO: what if iptables is not available, the next hop will send back ICMP Time Exceeded,
