@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"sync"
@@ -43,6 +42,7 @@ type tcpFlow struct {
 	handle       *net.IPConn                // the handle to send packets
 	seq          uint32                     // TCP sequence number
 	ack          uint32                     // TCP acknowledge number
+	isn          uint32                     // TCP initial sequence number
 	networkLayer gopacket.SerializableLayer // network layer header for tx
 	ts           time.Time                  // last packet incoming time
 }
@@ -153,11 +153,9 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 			if tcp.ACK {
 				e.seq = tcp.Ack
 			}
-			if tcp.PSH {
-				e.ack = tcp.Seq + uint32(len(tcp.Payload))
-			}
 			if tcp.SYN {
-				e.ack = tcp.Seq + 1
+				e.isn = tcp.Seq + 1
+				e.ack = e.isn
 			}
 
 			// only init once
@@ -451,8 +449,19 @@ func Dial(network, address string) (*TCPConn, error) {
 		}
 	}
 
-	// discards data flow on tcp conn
-	go io.Copy(ioutil.Discard, tcpconn)
+	// discard everything, but track ACK
+	go func() {
+		buf := make([]byte, 1024)
+		count := 0
+		for {
+			n, err := tcpconn.Read(buf)
+			if err != nil {
+				return
+			}
+			count += n
+			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.ack = e.isn + uint32(count) })
+		}
+	}()
 
 	return conn, nil
 }
@@ -559,7 +568,19 @@ func Listen(network, address string) (*TCPConn, error) {
 			// record net.Conn
 			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 
-			go io.Copy(ioutil.Discard, tcpconn)
+			// discard everything, but track ACK
+			go func() {
+				buf := make([]byte, 1024)
+				count := 0
+				for {
+					n, err := tcpconn.Read(buf)
+					if err != nil {
+						return
+					}
+					count += n
+					conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.ack = e.isn + uint32(count) })
+				}
+			}()
 		}
 	}()
 
