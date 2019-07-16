@@ -78,7 +78,7 @@ type TCPConn struct {
 	writeDeadline atomic.Value
 }
 
-// lockflow locks the flow table and apply function `f1` to the entry, create on if not exist
+// lockflow locks the flow table and apply function `f` to the entry, and create one if not exist
 func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	key := addr.String()
 	conn.flowsLock.Lock()
@@ -92,7 +92,7 @@ func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	conn.flowsLock.Unlock()
 }
 
-// clean expired connections
+// clean expired flows
 func (conn *TCPConn) cleaner() {
 	ticker := time.NewTicker(time.Minute)
 	select {
