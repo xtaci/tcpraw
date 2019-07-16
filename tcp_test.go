@@ -60,8 +60,8 @@ func startTCPRawServer() *TCPConn {
 
 	go func() {
 		defer conn.Close()
+		buf := make([]byte, 128)
 		for {
-			buf := make([]byte, 128)
 			n, addr, err := conn.ReadFrom(buf)
 			if err != nil {
 				log.Println("server readfrom:", err)

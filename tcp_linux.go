@@ -289,6 +289,8 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 
 		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
 		return len(p), nil
+	default: // assume this packet has lost, without notification
+		return len(p), nil
 	}
 }
 
