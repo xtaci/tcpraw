@@ -63,7 +63,7 @@ type TCPConn struct {
 	chMessage chan message
 
 	// all TCP flows
-	flowTable map[string]tcpFlow
+	flowTable map[string]*tcpFlow
 	flowsLock sync.Mutex
 
 	// iptables
@@ -82,12 +82,13 @@ type TCPConn struct {
 func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	key := addr.String()
 	conn.flowsLock.Lock()
-	e, ok := conn.flowTable[key]
-	if !ok { // entry first visit
+	e := conn.flowTable[key]
+	if e == nil { // entry first visit
+		e = new(tcpFlow)
 		e.writeReady = make(chan struct{})
 		e.ts = time.Now()
 	}
-	f(&e)
+	f(e)
 	conn.flowTable[key] = e
 	conn.flowsLock.Unlock()
 }
@@ -234,60 +235,63 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			ComputeChecksums: true,
 		}
 
-		// fetch flow
-		var flow tcpFlow
-		conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
-
-		// build tcp header with local and remote port
-		var lport int
-		if conn.tcpconn != nil {
-			lport = conn.tcpconn.LocalAddr().(*net.TCPAddr).Port
-		} else {
-			lport = conn.listener.Addr().(*net.TCPAddr).Port
-		}
-		tcp := &layers.TCP{
-			SrcPort: layers.TCPPort(lport),
-			DstPort: layers.TCPPort(raddr.Port),
-			Window:  uint16(rand.Intn(65536)),
-			Ack:     flow.ack,
-			Seq:     flow.seq,
-			PSH:     true,
-			ACK:     true,
-		}
-
-		// build IP header with src & dst ip
-		if raddr.IP.To4() != nil {
-			ip := &layers.IPv4{
-				Protocol: layers.IPProtocolTCP,
-				SrcIP:    flow.laddr.To4(),
-				DstIP:    raddr.IP.To4(),
+		// fill structs
+		var handle *net.IPConn
+		var tcp *layers.TCP
+		conn.lockflow(addr, func(e *tcpFlow) {
+			// build tcp header with local and remote port
+			var lport int
+			if conn.tcpconn != nil {
+				lport = conn.tcpconn.LocalAddr().(*net.TCPAddr).Port
+			} else {
+				lport = conn.listener.Addr().(*net.TCPAddr).Port
+			}
+			tcp = &layers.TCP{
+				SrcPort: layers.TCPPort(lport),
+				DstPort: layers.TCPPort(raddr.Port),
+				Window:  uint16(rand.Intn(65536)),
+				Ack:     e.ack,
+				Seq:     e.seq,
+				PSH:     true,
+				ACK:     true,
 			}
 
-			tcp.SetNetworkLayerForChecksum(ip)
-		} else {
-			ip := &layers.IPv6{
-				NextHeader: layers.IPProtocolTCP,
-				SrcIP:      flow.laddr.To16(),
-				DstIP:      raddr.IP.To16(),
+			// build IP header with src & dst ip for TCP checksum
+			if raddr.IP.To4() != nil {
+				ip := &layers.IPv4{
+					Protocol: layers.IPProtocolTCP,
+					SrcIP:    e.laddr.To4(),
+					DstIP:    raddr.IP.To4(),
+				}
+
+				tcp.SetNetworkLayerForChecksum(ip)
+			} else {
+				ip := &layers.IPv6{
+					NextHeader: layers.IPProtocolTCP,
+					SrcIP:      e.laddr.To16(),
+					DstIP:      raddr.IP.To16(),
+				}
+				tcp.SetNetworkLayerForChecksum(ip)
 			}
-			tcp.SetNetworkLayerForChecksum(ip)
-		}
+
+			// increase SEQ
+			e.seq += uint32(len(p))
+
+			handle = e.handle
+		})
 
 		payload := gopacket.Payload(p)
 		gopacket.SerializeLayers(buf, opts, tcp, payload)
 		if conn.tcpconn != nil {
-			if _, err := flow.handle.Write(buf.Bytes()); err != nil {
+			if _, err := handle.Write(buf.Bytes()); err != nil {
 				return 0, err
 			}
 		} else {
-			if _, err := flow.handle.WriteToIP(buf.Bytes(), &net.IPAddr{IP: raddr.IP}); err != nil {
+			if _, err := handle.WriteToIP(buf.Bytes(), &net.IPAddr{IP: raddr.IP}); err != nil {
 				return 0, err
 			}
 		}
-
 		buf.Clear()
-
-		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
 		return len(p), nil
 	default: // assume this packet has lost, without notification
 		return len(p), nil
@@ -410,7 +414,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	// fields
 	conn := new(TCPConn)
 	conn.die = make(chan struct{})
-	conn.flowTable = make(map[string]tcpFlow)
+	conn.flowTable = make(map[string]*tcpFlow)
 	conn.tcpconn = tcpconn
 	conn.chMessage = make(chan message)
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
@@ -458,7 +462,7 @@ func Dial(network, address string) (*TCPConn, error) {
 func Listen(network, address string) (*TCPConn, error) {
 	// fields
 	conn := new(TCPConn)
-	conn.flowTable = make(map[string]tcpFlow)
+	conn.flowTable = make(map[string]*tcpFlow)
 	conn.die = make(chan struct{})
 	conn.chMessage = make(chan message)
 
