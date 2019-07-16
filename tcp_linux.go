@@ -452,14 +452,14 @@ func Dial(network, address string) (*TCPConn, error) {
 	// discard everything, but track ACK
 	go func() {
 		buf := make([]byte, 1024)
-		count := 0
+		var count uint32
 		for {
 			n, err := tcpconn.Read(buf)
 			if err != nil {
 				return
 			}
-			count += n
-			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.ack = e.isn + uint32(count) })
+			count += uint32(n)
+			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.ack = e.isn + count })
 		}
 	}()
 
@@ -571,14 +571,14 @@ func Listen(network, address string) (*TCPConn, error) {
 			// discard everything, but track ACK
 			go func() {
 				buf := make([]byte, 1024)
-				count := 0
+				var count uint32
 				for {
 					n, err := tcpconn.Read(buf)
 					if err != nil {
 						return
 					}
-					count += n
-					conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.ack = e.isn + uint32(count) })
+					count += uint32(n)
+					conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.ack = e.isn + count })
 				}
 			}()
 		}
