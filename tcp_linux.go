@@ -36,8 +36,8 @@ type message struct {
 
 // a tcp flow information of a connection pair
 type tcpFlow struct {
+	writeReady   bool                       // mark whether this flow is ready to WriteTo
 	laddr        net.IP                     // the sending IP address
-	writeReady   chan struct{}              // mark whether this flow is ready to WriteTo
 	conn         *net.TCPConn               // the related system TCP connection of this flow
 	handle       *net.IPConn                // the handle to send packets
 	seq          uint32                     // TCP sequence number
@@ -85,7 +85,6 @@ func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	e := conn.flowTable[key]
 	if e == nil { // entry first visit
 		e = new(tcpFlow)
-		e.writeReady = make(chan struct{})
 		e.ts = time.Now()
 	}
 	f(e)
@@ -156,17 +155,9 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 			if tcp.SYN {
 				e.isn = tcp.Seq + 1
 				e.ack = e.isn
-			}
-
-			// only init once
-			select {
-			case <-e.writeReady:
-			default:
-				ipaddr := handle.LocalAddr().(*net.IPAddr)
-				e.laddr = make([]byte, len(ipaddr.IP))
-				copy(e.laddr, ipaddr.IP)
+				e.laddr = handle.LocalAddr().(*net.IPAddr).IP
 				e.handle = handle
-				close(e.writeReady)
+				e.writeReady = true
 			}
 		})
 
@@ -206,8 +197,9 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 
 // WriteTo implements the PacketConn WriteTo method.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	var ready chan struct{}
-	conn.lockflow(addr, func(e *tcpFlow) { ready = e.writeReady })
+	// make a copy of the flow
+	var flow tcpFlow
+	conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
 
 	var deadline <-chan time.Time
 	if d, ok := conn.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
@@ -221,7 +213,12 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, errTimeout
 	case <-conn.die:
 		return 0, io.EOF
-	case <-ready:
+	default:
+		// if the flow has not been ready, assume this packet has lost, without notification
+		if !flow.writeReady {
+			return len(p), nil
+		}
+
 		raddr, err := net.ResolveTCPAddr("tcp", addr.String())
 		if err != nil {
 			return 0, err
@@ -233,65 +230,55 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			ComputeChecksums: true,
 		}
 
-		// fill structs
-		var handle *net.IPConn
-		var tcp *layers.TCP
-		conn.lockflow(addr, func(e *tcpFlow) {
-			// build tcp header with local and remote port
-			var lport int
-			if conn.tcpconn != nil {
-				lport = conn.tcpconn.LocalAddr().(*net.TCPAddr).Port
-			} else {
-				lport = conn.listener.Addr().(*net.TCPAddr).Port
-			}
-			tcp = &layers.TCP{
-				SrcPort: layers.TCPPort(lport),
-				DstPort: layers.TCPPort(raddr.Port),
-				Window:  uint16(rand.Intn(65536)),
-				Ack:     e.ack,
-				Seq:     e.seq,
-				PSH:     true,
-				ACK:     true,
-			}
+		// build tcp header with local and remote port
+		var lport int
+		if conn.tcpconn != nil {
+			lport = conn.tcpconn.LocalAddr().(*net.TCPAddr).Port
+		} else {
+			lport = conn.listener.Addr().(*net.TCPAddr).Port
+		}
+		tcp := &layers.TCP{
+			SrcPort: layers.TCPPort(lport),
+			DstPort: layers.TCPPort(raddr.Port),
+			Window:  uint16(rand.Intn(65536)),
+			Ack:     flow.ack,
+			Seq:     flow.seq,
+			PSH:     true,
+			ACK:     true,
+		}
 
-			// build IP header with src & dst ip for TCP checksum
-			if raddr.IP.To4() != nil {
-				ip := &layers.IPv4{
-					Protocol: layers.IPProtocolTCP,
-					SrcIP:    e.laddr.To4(),
-					DstIP:    raddr.IP.To4(),
-				}
-
-				tcp.SetNetworkLayerForChecksum(ip)
-			} else {
-				ip := &layers.IPv6{
-					NextHeader: layers.IPProtocolTCP,
-					SrcIP:      e.laddr.To16(),
-					DstIP:      raddr.IP.To16(),
-				}
-				tcp.SetNetworkLayerForChecksum(ip)
+		// build IP header with src & dst ip for TCP checksum
+		if raddr.IP.To4() != nil {
+			ip := &layers.IPv4{
+				Protocol: layers.IPProtocolTCP,
+				SrcIP:    flow.laddr.To4(),
+				DstIP:    raddr.IP.To4(),
 			}
 
-			// increase SEQ
-			e.seq += uint32(len(p))
-
-			handle = e.handle
-		})
+			tcp.SetNetworkLayerForChecksum(ip)
+		} else {
+			ip := &layers.IPv6{
+				NextHeader: layers.IPProtocolTCP,
+				SrcIP:      flow.laddr.To16(),
+				DstIP:      raddr.IP.To16(),
+			}
+			tcp.SetNetworkLayerForChecksum(ip)
+		}
 
 		payload := gopacket.Payload(p)
 		gopacket.SerializeLayers(buf, opts, tcp, payload)
 		if conn.tcpconn != nil {
-			if _, err := handle.Write(buf.Bytes()); err != nil {
+			if _, err := flow.handle.Write(buf.Bytes()); err != nil {
 				return 0, err
 			}
 		} else {
-			if _, err := handle.WriteToIP(buf.Bytes(), &net.IPAddr{IP: raddr.IP}); err != nil {
+			if _, err := flow.handle.WriteToIP(buf.Bytes(), &net.IPAddr{IP: raddr.IP}); err != nil {
 				return 0, err
 			}
 		}
 		buf.Clear()
-		return len(p), nil
-	default: // assume this packet has lost, without notification
+		// increase seq in flow
+		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
 		return len(p), nil
 	}
 }
