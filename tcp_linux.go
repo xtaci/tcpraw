@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math/rand"
 	"net"
 	"sync"
@@ -158,6 +159,11 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 				e.laddr = handle.LocalAddr().(*net.IPAddr).IP
 				e.handle = handle
 				e.writeReady = true
+			}
+			if tcp.PSH {
+				if e.ack == tcp.Seq {
+					e.ack = tcp.Seq + uint32(len(tcp.Payload))
+				}
 			}
 		})
 
@@ -436,19 +442,8 @@ func Dial(network, address string) (*TCPConn, error) {
 		}
 	}
 
-	// discard everything, but track ACK
-	go func() {
-		buf := make([]byte, 1024)
-		var count uint32
-		for {
-			n, err := tcpconn.Read(buf)
-			if err != nil {
-				return
-			}
-			count += uint32(n)
-			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.ack = e.isn + count })
-		}
-	}()
+	// discard everything
+	go io.Copy(ioutil.Discard, tcpconn)
 
 	return conn, nil
 }
@@ -555,19 +550,8 @@ func Listen(network, address string) (*TCPConn, error) {
 			// record net.Conn
 			conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 
-			// discard everything, but track ACK
-			go func() {
-				buf := make([]byte, 1024)
-				var count uint32
-				for {
-					n, err := tcpconn.Read(buf)
-					if err != nil {
-						return
-					}
-					count += uint32(n)
-					conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.ack = e.isn + count })
-				}
-			}()
+			// discard everything
+			go io.Copy(ioutil.Discard, tcpconn)
 		}
 	}()
 
