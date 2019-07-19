@@ -1,5 +1,3 @@
-// +build linux
-
 package tcpraw
 
 import (
@@ -58,7 +56,7 @@ type TCPConn struct {
 	listener *net.TCPListener // from net.Listen
 
 	// handles
-	handles []*net.IPConn
+	handles []rawHandle
 
 	// packets captured from all related NICs will be delivered to this channel
 	chMessage chan message
@@ -390,7 +388,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	}
 
 	// AF_INET
-	handle, err := net.DialIP("ip:tcp", nil, &net.IPAddr{IP: raddr.IP})
+	handle, err := DialIP("ip:tcp", nil, &net.IPAddr{IP: raddr.IP})
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +473,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			if addrs, err := iface.Addrs(); err == nil {
 				for _, addr := range addrs {
 					if ipaddr, ok := addr.(*net.IPNet); ok {
-						if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP}); err == nil {
+						if handle, err := ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP}); err == nil {
 							conn.handles = append(conn.handles, handle)
 							go conn.captureFlow(handle, ipaddr.IP, laddr.Port)
 						} else {
