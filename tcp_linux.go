@@ -40,7 +40,7 @@ type tcpFlow struct {
 	writeReady   bool                       // mark whether this flow is ready to WriteTo
 	laddr        net.IP                     // the sending IP address
 	conn         *net.TCPConn               // the related system TCP connection of this flow
-	handle       *net.IPConn                // the handle to send packets
+	handle       rawHandle                  // the handle to send packets
 	seq          uint32                     // TCP sequence number
 	ack          uint32                     // TCP acknowledge number
 	isn          uint32                     // TCP initial sequence number
@@ -115,7 +115,7 @@ func (conn *TCPConn) cleaner() {
 }
 
 // captureFlow capture every inbound packets based on rules of BPF
-func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
+func (conn *TCPConn) captureFlow(handle rawHandle, laddr net.IP, port int) {
 	buf := make([]byte, 2048)
 	for {
 		n, addr, err := handle.ReadFromIP(buf)
@@ -156,7 +156,7 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 			if tcp.SYN {
 				e.isn = tcp.Seq + 1
 				e.ack = e.isn
-				e.laddr = handle.LocalAddr().(*net.IPAddr).IP
+				e.laddr = laddr
 				e.handle = handle
 				e.writeReady = true
 			}
@@ -410,7 +410,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.chMessage = make(chan message)
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 	conn.handles = append(conn.handles, handle)
-	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port)
+	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).IP, tcpconn.LocalAddr().(*net.TCPAddr).Port)
 	go conn.cleaner()
 
 	// iptables
@@ -477,7 +477,7 @@ func Listen(network, address string) (*TCPConn, error) {
 					if ipaddr, ok := addr.(*net.IPNet); ok {
 						if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP}); err == nil {
 							conn.handles = append(conn.handles, handle)
-							go conn.captureFlow(handle, laddr.Port)
+							go conn.captureFlow(handle, ipaddr.IP, laddr.Port)
 						} else {
 							lasterr = err
 						}
@@ -491,7 +491,7 @@ func Listen(network, address string) (*TCPConn, error) {
 	} else {
 		if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: laddr.IP}); err == nil {
 			conn.handles = append(conn.handles, handle)
-			go conn.captureFlow(handle, laddr.Port)
+			go conn.captureFlow(handle, laddr.IP, laddr.Port)
 		} else {
 			return nil, err
 		}
