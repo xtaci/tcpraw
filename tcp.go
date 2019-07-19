@@ -33,6 +33,15 @@ type message struct {
 	addr net.Addr
 }
 
+type rawHandle interface {
+	ReadFromIP(b []byte) (int, *net.IPAddr, error)
+	Write(b []byte) (int, error)
+	WriteToIP(b []byte, addr *net.IPAddr) (int, error)
+	SetReadBuffer(bytes int) error
+	SetWriteBuffer(bytes int) error
+	Close() error
+}
+
 // a tcp flow information of a connection pair
 type tcpFlow struct {
 	writeReady   bool                       // mark whether this flow is ready to WriteTo
