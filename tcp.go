@@ -504,7 +504,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			return nil, lasterr
 		}
 	} else {
-		if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: laddr.IP}); err == nil {
+		if handle, err := ListenIP("ip:tcp", &net.IPAddr{IP: laddr.IP}); err == nil {
 			conn.handles = append(conn.handles, handle)
 			go conn.captureFlow(handle, laddr.IP, laddr.Port)
 		} else {
