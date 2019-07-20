@@ -37,8 +37,6 @@ type rawHandle interface {
 	ReadFromIP(b []byte) (int, *net.IPAddr, error)
 	Write(b []byte) (int, error)
 	WriteToIP(b []byte, addr *net.IPAddr) (int, error)
-	SetReadBuffer(bytes int) error
-	SetWriteBuffer(bytes int) error
 	Close() error
 }
 
@@ -371,20 +369,30 @@ func (conn *TCPConn) SetWriteDeadline(t time.Time) error {
 
 // SetReadBuffer sets the size of the operating system's receive buffer associated with the connection.
 func (conn *TCPConn) SetReadBuffer(bytes int) error {
-	var err error
 	for k := range conn.handles {
-		err = conn.handles[k].SetReadBuffer(bytes)
+		if nc, ok := conn.handles[k].(interface {
+			SetReadBuffer(int) error
+		}); ok {
+			if err := nc.SetReadBuffer(bytes); err != nil {
+				return err
+			}
+		}
 	}
-	return err
+	return nil
 }
 
 // SetWriteBuffer sets the size of the operating system's transmit buffer associated with the connection.
 func (conn *TCPConn) SetWriteBuffer(bytes int) error {
-	var err error
 	for k := range conn.handles {
-		err = conn.handles[k].SetWriteBuffer(bytes)
+		if nc, ok := conn.handles[k].(interface {
+			SetWriteBuffer(int) error
+		}); ok {
+			if err := nc.SetWriteBuffer(bytes); err != nil {
+				return err
+			}
+		}
 	}
-	return err
+	return nil
 }
 
 // Dial connects to the remote TCP port,
