@@ -33,6 +33,7 @@ type message struct {
 	addr net.Addr
 }
 
+// rawHandle is the interface for capturing on different platform
 type rawHandle interface {
 	ReadFromIP(b []byte) (int, *net.IPAddr, error)
 	Write(b []byte) (int, error)
