@@ -160,10 +160,11 @@ func BenchmarkEcho(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	buf := make([]byte, 1500)
+	buf := make([]byte, 1024)
 	b.ReportAllocs()
+	b.SetBytes(int64(len(buf)))
 	for i := 0; i < b.N; i++ {
-		n, err := conn.WriteTo([]byte("abc"), addr)
+		n, err := conn.WriteTo(buf, addr)
 		if err != nil {
 			b.Fatal(n, err)
 		}

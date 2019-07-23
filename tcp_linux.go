@@ -46,6 +46,8 @@ type tcpFlow struct {
 	isn          uint32                     // TCP initial sequence number
 	networkLayer gopacket.SerializableLayer // network layer header for tx
 	ts           time.Time                  // last packet incoming time
+	buf          gopacket.SerializeBuffer   // a buffer for write
+	tcpHeader    layers.TCP
 }
 
 // TCPConn defines a TCP-packet oriented connection
@@ -77,6 +79,9 @@ type TCPConn struct {
 	// deadlines
 	readDeadline  atomic.Value
 	writeDeadline atomic.Value
+
+	// serialization
+	opts gopacket.SerializeOptions
 }
 
 // lockflow locks the flow table and apply function `f` to the entry, and create one if not exist
@@ -87,6 +92,7 @@ func (conn *TCPConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 	if e == nil { // entry first visit
 		e = new(tcpFlow)
 		e.ts = time.Now()
+		e.buf = gopacket.NewSerializeBuffer()
 	}
 	f(e)
 	conn.flowTable[key] = e
@@ -117,6 +123,7 @@ func (conn *TCPConn) cleaner() {
 // captureFlow capture every inbound packets based on rules of BPF
 func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 	buf := make([]byte, 2048)
+	opt := gopacket.DecodeOptions{NoCopy: true, Lazy: true}
 	for {
 		n, addr, err := handle.ReadFromIP(buf)
 		if err != nil {
@@ -124,7 +131,7 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 		}
 
 		// try decoding TCP frame from buf[:n]
-		packet := gopacket.NewPacket(buf[:n], layers.LayerTypeTCP, gopacket.DecodeOptions{NoCopy: true, Lazy: true})
+		packet := gopacket.NewPacket(buf[:n], layers.LayerTypeTCP, opt)
 		transport := packet.TransportLayer()
 		tcp, ok := transport.(*layers.TCP)
 		if !ok {
@@ -203,10 +210,6 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 
 // WriteTo implements the PacketConn WriteTo method.
 func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	// make a copy of the flow
-	var flow tcpFlow
-	conn.lockflow(addr, func(e *tcpFlow) { flow = *e })
-
 	var deadline <-chan time.Time
 	if d, ok := conn.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
 		timer := time.NewTimer(time.Until(d))
@@ -220,73 +223,64 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	case <-conn.die:
 		return 0, io.EOF
 	default:
-		// if the flow has not been ready, assume this packet has lost, without notification
-		if !flow.writeReady {
-			return len(p), nil
-		}
-
 		raddr, err := net.ResolveTCPAddr("tcp", addr.String())
 		if err != nil {
 			return 0, err
 		}
 
-		buf := gopacket.NewSerializeBuffer()
-		opts := gopacket.SerializeOptions{
-			FixLengths:       true,
-			ComputeChecksums: true,
-		}
-
-		// build tcp header with local and remote port
 		var lport int
 		if conn.tcpconn != nil {
 			lport = conn.tcpconn.LocalAddr().(*net.TCPAddr).Port
 		} else {
 			lport = conn.listener.Addr().(*net.TCPAddr).Port
 		}
-		tcp := &layers.TCP{
-			SrcPort: layers.TCPPort(lport),
-			DstPort: layers.TCPPort(raddr.Port),
-			Window:  uint16(rand.Intn(65536)),
-			Ack:     flow.ack,
-			Seq:     flow.seq,
-			PSH:     true,
-			ACK:     true,
-		}
 
-		// build IP header with src & dst ip for TCP checksum
-		if raddr.IP.To4() != nil {
-			ip := &layers.IPv4{
-				Protocol: layers.IPProtocolTCP,
-				SrcIP:    flow.laddr.To4(),
-				DstIP:    raddr.IP.To4(),
+		conn.lockflow(addr, func(e *tcpFlow) {
+			// if the flow has not been ready, assume this packet has lost, without notification
+			if !e.writeReady {
+				n = len(p)
+				return
 			}
 
-			tcp.SetNetworkLayerForChecksum(ip)
-		} else {
-			ip := &layers.IPv6{
-				NextHeader: layers.IPProtocolTCP,
-				SrcIP:      flow.laddr.To16(),
-				DstIP:      raddr.IP.To16(),
-			}
-			tcp.SetNetworkLayerForChecksum(ip)
-		}
+			// build tcp header with local and remote port
+			e.tcpHeader.SrcPort = layers.TCPPort(lport)
+			e.tcpHeader.DstPort = layers.TCPPort(raddr.Port)
+			e.tcpHeader.Window = uint16(rand.Intn(65536))
+			e.tcpHeader.Ack = e.ack
+			e.tcpHeader.Seq = e.seq
+			e.tcpHeader.PSH = true
+			e.tcpHeader.ACK = true
 
-		payload := gopacket.Payload(p)
-		gopacket.SerializeLayers(buf, opts, tcp, payload)
-		if conn.tcpconn != nil {
-			if _, err := flow.handle.Write(buf.Bytes()); err != nil {
-				return 0, err
+			// build IP header with src & dst ip for TCP checksum
+			if raddr.IP.To4() != nil {
+				ip := &layers.IPv4{
+					Protocol: layers.IPProtocolTCP,
+					SrcIP:    e.laddr.To4(),
+					DstIP:    raddr.IP.To4(),
+				}
+				e.tcpHeader.SetNetworkLayerForChecksum(ip)
+			} else {
+				ip := &layers.IPv6{
+					NextHeader: layers.IPProtocolTCP,
+					SrcIP:      e.laddr.To16(),
+					DstIP:      raddr.IP.To16(),
+				}
+				e.tcpHeader.SetNetworkLayerForChecksum(ip)
 			}
-		} else {
-			if _, err := flow.handle.WriteToIP(buf.Bytes(), &net.IPAddr{IP: raddr.IP}); err != nil {
-				return 0, err
+
+			e.buf.Clear()
+			gopacket.SerializeLayers(e.buf, conn.opts, &e.tcpHeader, gopacket.Payload(p))
+			if conn.tcpconn != nil {
+				_, err = e.handle.Write(e.buf.Bytes())
+			} else {
+				_, err = e.handle.WriteToIP(e.buf.Bytes(), &net.IPAddr{IP: raddr.IP})
 			}
-		}
-		buf.Clear()
-		// increase seq in flow
-		conn.lockflow(addr, func(e *tcpFlow) { e.seq += uint32(len(p)) })
-		return len(p), nil
+			// increase seq in flow
+			e.seq += uint32(len(p))
+			n = len(p)
+		})
 	}
+	return
 }
 
 // Close closes the connection.
@@ -410,6 +404,10 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.chMessage = make(chan message)
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 	conn.handles = append(conn.handles, handle)
+	conn.opts = gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
 	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port)
 	go conn.cleaner()
 
@@ -456,6 +454,10 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn.flowTable = make(map[string]*tcpFlow)
 	conn.die = make(chan struct{})
 	conn.chMessage = make(chan message)
+	conn.opts = gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
 
 	// resolve address
 	laddr, err := net.ResolveTCPAddr(network, address)
