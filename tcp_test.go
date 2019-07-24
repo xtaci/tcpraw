@@ -60,7 +60,7 @@ func startTCPRawServer() *TCPConn {
 
 	go func() {
 		defer conn.Close()
-		buf := make([]byte, 128)
+		buf := make([]byte, 1024)
 		for {
 			n, addr, err := conn.ReadFrom(buf)
 			if err != nil {
@@ -110,7 +110,7 @@ func TestDialTCPStream(t *testing.T) {
 		t.Fatal(n, err)
 	}
 
-	buf := make([]byte, 1500)
+	buf := make([]byte, 1024)
 	if n, addr, err := conn.ReadFrom(buf); err != nil {
 		t.Fatal(n, addr, err)
 	} else {
@@ -136,7 +136,7 @@ func TestDialToTCPPacket(t *testing.T) {
 	}
 	log.Println("written")
 
-	buf := make([]byte, 1500)
+	buf := make([]byte, 1024)
 	log.Println("readfrom buf")
 	if n, addr, err := conn.ReadFrom(buf); err != nil {
 		log.Println(err)
