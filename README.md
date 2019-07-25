@@ -17,23 +17,35 @@
 
 # Introduction
 
-A packet-oriented connection by simulating tcp protocol
+A packet-oriented connection by simulating TCP protocol
 
 ## Features
 
+0. Tiny
 1. Support IPv4 and IPv6.
+2. Realistic sliding window, NAT friendly.
+3. Pure golang without cgo, available on all architecture.
 
 ## Documentation
 
 For complete documentation, see the associated [Godoc](https://godoc.org/github.com/xtaci/tcpraw).
 
 
-## Tips
-```
-sudo tcpdump -v -n -i lo0 ip and 'ip[8]>0' and tcp and port 3457
-```
+## Benchmark
 
+```
+goos: linux
+goarch: amd64
+pkg: github.com/xtaci/tcpraw
+BenchmarkEcho-2   	   20000	     93036 ns/op	  11.01 MB/s	    6200 B/op	      62 allocs/op
+PASS
+ok  	github.com/xtaci/tcpraw	2.758s
+```
 
 ## Status
 
-GA
+Stable
+
+## Who is using this
+
+https://github.com/xtaci/kcptun
