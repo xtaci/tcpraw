@@ -3,11 +3,12 @@
 package tcpraw
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -24,10 +25,6 @@ var (
 	errTimeout          = errors.New("timeout")
 	expire              = time.Minute
 )
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
 
 // a message from NIC
 type message struct {
@@ -245,7 +242,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			// build tcp header with local and remote port
 			e.tcpHeader.SrcPort = layers.TCPPort(lport)
 			e.tcpHeader.DstPort = layers.TCPPort(raddr.Port)
-			e.tcpHeader.Window = uint16(rand.Intn(65536))
+			binary.Read(rand.Reader, binary.LittleEndian, &e.tcpHeader.Window)
 			e.tcpHeader.Ack = e.ack
 			e.tcpHeader.Seq = e.seq
 			e.tcpHeader.PSH = true
