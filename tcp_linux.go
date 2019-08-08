@@ -34,13 +34,11 @@ type message struct {
 
 // a tcp flow information of a connection pair
 type tcpFlow struct {
-	writeReady   bool                       // mark whether this flow is ready to WriteTo
 	laddr        net.IP                     // the sending IP address
 	conn         *net.TCPConn               // the related system TCP connection of this flow
 	handle       *net.IPConn                // the handle to send packets
 	seq          uint32                     // TCP sequence number
 	ack          uint32                     // TCP acknowledge number
-	isn          uint32                     // TCP initial sequence number
 	networkLayer gopacket.SerializableLayer // network layer header for tx
 	ts           time.Time                  // last packet incoming time
 	buf          gopacket.SerializeBuffer   // a buffer for write
@@ -158,17 +156,15 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 				e.seq = tcp.Ack
 			}
 			if tcp.SYN {
-				e.isn = tcp.Seq + 1
-				e.ack = e.isn
-				e.laddr = handle.LocalAddr().(*net.IPAddr).IP
-				e.handle = handle
-				e.writeReady = true
+				e.ack = tcp.Seq + 1
 			}
 			if tcp.PSH {
 				if e.ack == tcp.Seq {
 					e.ack = tcp.Seq + uint32(len(tcp.Payload))
 				}
 			}
+			e.laddr = handle.LocalAddr().(*net.IPAddr).IP
+			e.handle = handle
 		})
 
 		// push data if it's not orphan
@@ -233,8 +229,8 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		}
 
 		conn.lockflow(addr, func(e *tcpFlow) {
-			// if the flow has not been ready, assume this packet has lost, without notification
-			if !e.writeReady {
+			// if the flow doesn't have handle , assume this packet has lost, without notification
+			if e.handle == nil {
 				n = len(p)
 				return
 			}
