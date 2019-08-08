@@ -34,7 +34,6 @@ type message struct {
 
 // a tcp flow information of a connection pair
 type tcpFlow struct {
-	laddr        net.IP                     // the sending IP address
 	conn         *net.TCPConn               // the related system TCP connection of this flow
 	handle       *net.IPConn                // the handle to send packets
 	seq          uint32                     // TCP sequence number
@@ -163,7 +162,6 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 					e.ack = tcp.Seq + uint32(len(tcp.Payload))
 				}
 			}
-			e.laddr = handle.LocalAddr().(*net.IPAddr).IP
 			e.handle = handle
 		})
 
@@ -239,6 +237,7 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			e.tcpHeader.SrcPort = layers.TCPPort(lport)
 			e.tcpHeader.DstPort = layers.TCPPort(raddr.Port)
 			binary.Read(rand.Reader, binary.LittleEndian, &e.tcpHeader.Window)
+			e.tcpHeader.Window |= 0x8000 // make sure it's larger than 32768
 			e.tcpHeader.Ack = e.ack
 			e.tcpHeader.Seq = e.seq
 			e.tcpHeader.PSH = true
@@ -248,14 +247,14 @@ func (conn *TCPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			if raddr.IP.To4() != nil {
 				ip := &layers.IPv4{
 					Protocol: layers.IPProtocolTCP,
-					SrcIP:    e.laddr.To4(),
+					SrcIP:    e.handle.LocalAddr().(*net.IPAddr).IP.To4(),
 					DstIP:    raddr.IP.To4(),
 				}
 				e.tcpHeader.SetNetworkLayerForChecksum(ip)
 			} else {
 				ip := &layers.IPv6{
 					NextHeader: layers.IPProtocolTCP,
-					SrcIP:      e.laddr.To16(),
+					SrcIP:      e.handle.LocalAddr().(*net.IPAddr).IP.To16(),
 					DstIP:      raddr.IP.To16(),
 				}
 				e.tcpHeader.SetNetworkLayerForChecksum(ip)
