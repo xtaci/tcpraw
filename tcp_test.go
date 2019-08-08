@@ -148,6 +148,23 @@ func TestDialToTCPPacket(t *testing.T) {
 	log.Println("complete")
 }
 
+func TestSettings(t *testing.T) {
+	conn, err := Dial("tcp", portRemotePacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDSCP(46); err != nil {
+		log.Fatal("SetDSCP:", err)
+	}
+	if err := conn.SetReadBuffer(4096); err != nil {
+		log.Fatal("SetReaderBuffer:", err)
+	}
+	if err := conn.SetWriteBuffer(4096); err != nil {
+		log.Fatal("SetWriteBuffer:", err)
+	}
+}
+
 func BenchmarkEcho(b *testing.B) {
 	conn, err := Dial("tcp", portRemotePacket)
 	if err != nil {

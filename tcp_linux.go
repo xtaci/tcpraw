@@ -348,11 +348,23 @@ func (conn *TCPConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
+// SetDSCP sets the 6bit DSCP field in IPv4 header, or 8bit Traffic Class in IPv6 header.
+func (conn *TCPConn) SetDSCP(dscp int) error {
+	for k := range conn.handles {
+		if err := setDSCP(conn.handles[k], dscp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SetReadBuffer sets the size of the operating system's receive buffer associated with the connection.
 func (conn *TCPConn) SetReadBuffer(bytes int) error {
 	var err error
 	for k := range conn.handles {
-		err = conn.handles[k].SetReadBuffer(bytes)
+		if err := conn.handles[k].SetReadBuffer(bytes); err != nil {
+			return err
+		}
 	}
 	return err
 }
@@ -361,7 +373,9 @@ func (conn *TCPConn) SetReadBuffer(bytes int) error {
 func (conn *TCPConn) SetWriteBuffer(bytes int) error {
 	var err error
 	for k := range conn.handles {
-		err = conn.handles[k].SetWriteBuffer(bytes)
+		if err := conn.handles[k].SetWriteBuffer(bytes); err != nil {
+			return err
+		}
 	}
 	return err
 }
@@ -553,15 +567,12 @@ func Listen(network, address string) (*TCPConn, error) {
 }
 
 // setTTL sets the Time-To-Live field on a given connection
-func setTTL(c *net.TCPConn, ttl int) (err error) {
-	var raw syscall.RawConn
-	var addr *net.TCPAddr
-
-	raw, err = c.SyscallConn()
+func setTTL(c *net.TCPConn, ttl int) error {
+	raw, err := c.SyscallConn()
 	if err != nil {
 		return err
 	}
-	addr = c.LocalAddr().(*net.TCPAddr)
+	addr := c.LocalAddr().(*net.TCPAddr)
 
 	if addr.IP.To4() == nil {
 		raw.Control(func(fd uintptr) {
@@ -572,5 +583,25 @@ func setTTL(c *net.TCPConn, ttl int) (err error) {
 			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
 		})
 	}
-	return
+	return err
+}
+
+// setDSCP sets the 6bit DSCP field in IPv4 header, or 8bit Traffic Class in IPv6 header.
+func setDSCP(c *net.IPConn, dscp int) error {
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return err
+	}
+	addr := c.LocalAddr().(*net.IPAddr)
+
+	if addr.IP.To4() == nil {
+		raw.Control(func(fd uintptr) {
+			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, dscp)
+		})
+	} else {
+		raw.Control(func(fd uintptr) {
+			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TOS, dscp<<2)
+		})
+	}
+	return err
 }
