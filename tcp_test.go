@@ -100,6 +100,16 @@ func TestDialTCPStream(t *testing.T) {
 	}
 	defer conn.Close()
 
+	rules, err := conn.iptables.List("filter", "OUTPUT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// print rules
+	for _, rule := range rules {
+		t.Log(rule)
+	}
+
 	addr, err := net.ResolveTCPAddr("tcp", testPortStream)
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +125,18 @@ func TestDialTCPStream(t *testing.T) {
 		t.Fatal(n, addr, err)
 	} else {
 		log.Println(string(buf[:n]), "from:", addr)
+	}
+
+	conn.Close()
+	t.Log("clean iptables")
+	rules, err = conn.iptables.List("filter", "OUTPUT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// print rules
+	for _, rule := range rules {
+		t.Log(rule)
 	}
 }
 

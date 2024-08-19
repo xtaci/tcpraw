@@ -25,6 +25,7 @@
 package tcpraw
 
 import (
+	"container/list"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -47,11 +48,6 @@ var (
 	errOpNotImplemented = errors.New("operation not implemented") // Error for unimplemented operations
 	errTimeout          = errors.New("timeout")                   // Error for operation timeout
 	expire              = time.Minute                             // Duration to define expiration time for flows
-)
-
-var (
-	totalConns   uint32 // count of alive client connection for iptables
-	totalConnsMu sync.Mutex
 )
 
 // a message from NIC
@@ -80,6 +76,7 @@ type TCPConn struct {
 
 // tcpConn defines a TCP-packet oriented connection
 type tcpConn struct {
+	elem    *list.Element
 	die     chan struct{}
 	dieOnce sync.Once
 
@@ -340,19 +337,13 @@ func (conn *tcpConn) Close() error {
 			conn.handles[k].Close()
 		}
 
-		// delete iptables if no alive connection
-		totalConnsMu.Lock()
-		totalConns--
-		if totalConns == 0 {
-			// delete iptable
-			if conn.iptables != nil {
-				conn.iptables.Delete("filter", "OUTPUT", conn.iprule...)
-			}
-			if conn.ip6tables != nil {
-				conn.ip6tables.Delete("filter", "OUTPUT", conn.ip6rule...)
-			}
+		// delete iptable
+		if conn.iptables != nil {
+			conn.iptables.Delete("filter", "OUTPUT", conn.iprule...)
 		}
-		totalConnsMu.Unlock()
+		if conn.ip6tables != nil {
+			conn.ip6tables.Delete("filter", "OUTPUT", conn.ip6rule...)
+		}
 	})
 	return err
 }
@@ -444,6 +435,12 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
+	// parse local ip and port from tcpconn
+	laddr, lport, err := net.SplitHostPort(tcpconn.LocalAddr().String())
+	if err != nil {
+		return nil, err
+	}
+
 	// fields
 	conn := new(tcpConn)
 	conn.die = make(chan struct{})
@@ -465,34 +462,29 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	totalConnsMu.Lock()
-	totalConns++
 	// setup iptables only when it's the first connection
-	if totalConns == 1 {
-		if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
-			rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
-			if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
-				if !exists {
-					if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-						conn.iprule = rule
-						conn.iptables = ipt
-					}
-				}
-			}
-		}
-		if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
-			rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
-			if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
-				if !exists {
-					if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-						conn.ip6rule = rule
-						conn.ip6tables = ipt
-					}
+	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
+		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr, "--sport", lport, "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
+		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
+			if !exists {
+				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+					conn.iprule = rule
+					conn.iptables = ipt
 				}
 			}
 		}
 	}
-	totalConnsMu.Unlock()
+	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
+		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr, "--sport", lport, "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
+		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
+			if !exists {
+				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+					conn.ip6rule = rule
+					conn.ip6tables = ipt
+				}
+			}
+		}
+	}
 
 	// discard everything
 	go io.Copy(ioutil.Discard, tcpconn)
