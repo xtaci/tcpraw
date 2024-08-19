@@ -25,7 +25,6 @@
 package tcpraw
 
 import (
-	"container/list"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -76,7 +75,6 @@ type TCPConn struct {
 
 // tcpConn defines a TCP-packet oriented connection
 type tcpConn struct {
-	elem    *list.Element
 	die     chan struct{}
 	dieOnce sync.Once
 
