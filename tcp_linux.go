@@ -49,6 +49,11 @@ var (
 	expire              = time.Minute                             // Duration to define expiration time for flows
 )
 
+var (
+	totalConns   uint32 // count of alive client connection for iptables
+	totalConnsMu sync.Mutex
+)
+
 // a message from NIC
 type message struct {
 	bts  []byte
@@ -124,6 +129,8 @@ func (conn *tcpConn) lockflow(addr net.Addr, f func(e *tcpFlow)) {
 // clean expired flows
 func (conn *tcpConn) cleaner() {
 	ticker := time.NewTicker(time.Minute) // Create a ticker to trigger flow cleanup every minute
+	defer ticker.Stop()
+
 	select {
 	case <-conn.die: // Exit if the connection is closed
 		return
@@ -306,6 +313,7 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 // Close closes the connection.
 func (conn *tcpConn) Close() error {
 	var err error
+
 	conn.dieOnce.Do(func() {
 		// signal closing
 		close(conn.die)
@@ -332,13 +340,19 @@ func (conn *tcpConn) Close() error {
 			conn.handles[k].Close()
 		}
 
-		// delete iptable
-		if conn.iptables != nil {
-			conn.iptables.Delete("filter", "OUTPUT", conn.iprule...)
+		// delete iptables if no alive connection
+		totalConnsMu.Lock()
+		totalConns--
+		if totalConns == 0 {
+			// delete iptable
+			if conn.iptables != nil {
+				conn.iptables.Delete("filter", "OUTPUT", conn.iprule...)
+			}
+			if conn.ip6tables != nil {
+				conn.ip6tables.Delete("filter", "OUTPUT", conn.ip6rule...)
+			}
 		}
-		if conn.ip6tables != nil {
-			conn.ip6tables.Delete("filter", "OUTPUT", conn.ip6rule...)
-		}
+		totalConnsMu.Unlock()
 	})
 	return err
 }
@@ -451,28 +465,34 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
-		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
-		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
-			if !exists {
-				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-					conn.iprule = rule
-					conn.iptables = ipt
+	totalConnsMu.Lock()
+	totalConns++
+	// setup iptables only when it's the first connection
+	if totalConns == 1 {
+		if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
+			rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
+			if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
+				if !exists {
+					if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+						conn.iprule = rule
+						conn.iptables = ipt
+					}
+				}
+			}
+		}
+		if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
+			rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
+			if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
+				if !exists {
+					if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
+						conn.ip6rule = rule
+						conn.ip6tables = ipt
+					}
 				}
 			}
 		}
 	}
-	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
-		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
-		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
-			if !exists {
-				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-					conn.ip6rule = rule
-					conn.ip6tables = ipt
-				}
-			}
-		}
-	}
+	totalConnsMu.Unlock()
 
 	// discard everything
 	go io.Copy(ioutil.Discard, tcpconn)
