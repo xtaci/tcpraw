@@ -1,6 +1,6 @@
 module github.com/xtaci/tcpraw
 
-go 1.13.0
+go 1.13
 
 require (
 	github.com/coreos/go-iptables v0.7.0
