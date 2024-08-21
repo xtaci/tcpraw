@@ -283,6 +283,7 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			e.tcpHeader.PSH = true
 			e.tcpHeader.ACK = true
 			e.tcpHeader.Options = conn.tcpFingerPrint.Options
+			makeOption(conn.tcpFingerPrint.Type, e.tcpHeader.Options)
 
 			// build IP header with src & dst ip for TCP checksum
 			if raddr.IP.To4() != nil {
@@ -467,7 +468,7 @@ func Dial(network, address string) (*TCPConn, error) {
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-	conn.tcpFingerPrint = fingerPrintWindows
+	conn.tcpFingerPrint = fingerPrintLinux
 
 	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port)
 	go conn.cleaner()
@@ -525,7 +526,7 @@ func Listen(network, address string) (*TCPConn, error) {
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-	conn.tcpFingerPrint = fingerPrintWindows
+	conn.tcpFingerPrint = fingerPrintLinux
 
 	// resolve address
 	laddr, err := net.ResolveTCPAddr(network, address)
