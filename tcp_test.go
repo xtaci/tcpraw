@@ -213,3 +213,9 @@ func BenchmarkEcho(b *testing.B) {
 		}
 	}
 }
+
+func TestFingerPrint(t *testing.T) {
+	for k := range fingerPrintWindows.Options {
+		t.Log(fingerPrintWindows.Options[k].String())
+	}
+}
