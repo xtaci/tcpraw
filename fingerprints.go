@@ -9,12 +9,6 @@ import (
 
 type FingerPrintType int
 
-var seed uint64
-
-func init() {
-	seed = uint64(time.Now().UnixNano())
-}
-
 const (
 	TypeLinux FingerPrintType = iota
 )
@@ -40,10 +34,17 @@ var fingerPrintLinux = fingerPrint{
 
 var defaultFingerPrint = fingerPrintLinux
 
+var seed uint32
+
+func init() {
+	seed = uint32(time.Now().UnixNano())
+}
+
 func makeOption(optType FingerPrintType, options []layers.TCPOption) {
 	switch optType {
 	case TypeLinux:
-		nowMilli := (seed + uint64(time.Now().UnixNano())/1e9) & 0xFFFFFFFF
-		binary.BigEndian.PutUint32(options[2].OptionData[6:], uint32(nowMilli))
+		nowMilli := time.Now().UnixNano() / 1e9
+		binary.BigEndian.PutUint32(options[2].OptionData[:4], uint32(nowMilli))
+		binary.BigEndian.PutUint32(options[2].OptionData[4:], uint32(seed+uint32(nowMilli)))
 	}
 }
