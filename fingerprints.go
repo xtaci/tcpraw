@@ -47,10 +47,7 @@ var fingerPrintLinux = fingerPrint{
 
 var defaultFingerPrint = fingerPrintLinux
 
-var seed uint32
-
 func init() {
-	seed = uint32(time.Now().UnixNano())
 }
 
 func makeOption(optType FingerPrintType, options []layers.TCPOption, tsecr uint32) {
@@ -59,8 +56,9 @@ func makeOption(optType FingerPrintType, options []layers.TCPOption, tsecr uint3
 		// Timestamps: Kind 8, Length 10
 		for i := range options {
 			if options[i].OptionType == 8 && len(options[i].OptionData) == 10 {
-				nowSeconds := time.Now().UnixNano() / 1e9
-				binary.BigEndian.PutUint32(options[i].OptionData[:4], uint32(nowSeconds))
+				// Use milliseconds for timestamp to be more realistic (RFC 7323)
+				nowMillis := time.Now().UnixNano() / 1e6
+				binary.BigEndian.PutUint32(options[i].OptionData[:4], uint32(nowMillis))
 				binary.BigEndian.PutUint32(options[i].OptionData[4:], tsecr)
 				break
 			}
